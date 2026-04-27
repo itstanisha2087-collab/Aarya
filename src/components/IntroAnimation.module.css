@@ -1,0 +1,70 @@
+.container {
+  position: fixed;
+  inset: 0;
+  background-color: #050508;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+}
+
+.powerOrb {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cloud {
+  width: 180px; /* Massively increased size */
+  height: 180px;
+  border-radius: 50%;
+  z-index: 1;
+}
+
+.impactFlash {
+  position: absolute;
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  background: white;
+  filter: blur(20px);
+  z-index: 10;
+}
+
+.sparkAnchor {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 30px;
+}
+
+.greeting {
+  font-family: 'Inter', sans-serif;
+  font-size: 0.6rem;
+  letter-spacing: 0.4em;
+  text-transform: uppercase;
+  color: #7DD3FC;
+  white-space: nowrap;
+}
+
+.skipBtn {
+  position: absolute;
+  bottom: 30px;
+  right: 30px;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.5rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: #555555;
+  opacity: 0.4;
+  z-index: 1001;
+}
