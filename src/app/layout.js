@@ -1,27 +1,21 @@
-import { Inter, Playfair_Display } from "next/font/google";
+import { Inter } from "next/font/google";
 import "./globals.css";
 
 const inter = Inter({
   subsets: ["latin"],
   variable: "--font-inter",
   display: "swap",
-});
-
-const playfair = Playfair_Display({
-  subsets: ["latin"],
-  variable: "--font-playfair",
-  display: "swap",
+  weight: ["100", "200", "300", "400", "500"],
 });
 
 export const metadata = {
-  title: "Aarya — Your Intimate AI Companion",
-  description:
-    "A safe, warm space to think, feel, and grow — with Aarya always by your side.",
+  title: "AARYA — AI Presence Interface",
+  description: "You are not opening an app. You are awakening an AI.",
 };
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en" className={`${inter.variable} ${playfair.variable}`}>
+    <html lang="en" className={inter.variable}>
       <body>{children}</body>
     </html>
   );

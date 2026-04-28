@@ -1,0 +1,69 @@
+.container {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: #000000;
+  z-index: 100;
+  overflow: hidden;
+}
+
+.svgLayer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+  pointer-events: none;
+  mix-blend-mode: screen;
+}
+
+.textContainer {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.letter {
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-weight: 100;
+  font-size: clamp(3rem, 10vw, 8rem);
+  letter-spacing: 0.45em;
+  color: #FFFFFF;
+  text-transform: uppercase;
+  user-select: none;
+  text-rendering: geometricPrecision;
+  display: inline-block;
+  will-change: transform, opacity, filter;
+}
+
+/* Fix spacing on the last letter so it stays perfectly centered */
+.letter:last-child {
+  letter-spacing: 0;
+  padding-right: 0.45em;
+}
+
+.textGlow {
+  position: absolute;
+  width: 150%;
+  height: 250%;
+  background: radial-gradient(
+    ellipse at center,
+    rgba(255, 255, 255, 0.08) 0%,
+    rgba(255, 255, 255, 0.02) 40%,
+    transparent 70%
+  );
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 2s cubic-bezier(0.22, 1, 0.36, 1);
+  z-index: 0;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.textGlowActive {
+  opacity: 1;
+}

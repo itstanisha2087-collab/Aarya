@@ -1,0 +1,59 @@
+.container {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: #000000;
+  z-index: 100;
+  overflow: hidden;
+}
+
+.sparkCanvas {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  mix-blend-mode: screen;
+}
+
+.textContainer {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.aaryaText {
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-weight: 100;
+  font-size: clamp(3rem, 10vw, 8rem);
+  letter-spacing: 0.45em;
+  color: #FFFFFF;
+  text-transform: uppercase;
+  user-select: none;
+  position: relative;
+  z-index: 3;
+  padding-right: 0.45em; /* compensate letter-spacing on last char */
+  text-rendering: geometricPrecision;
+}
+
+.textGlow {
+  position: absolute;
+  width: 120%;
+  height: 200%;
+  background: radial-gradient(
+    ellipse at center,
+    rgba(255, 255, 255, 0.04) 0%,
+    rgba(255, 255, 255, 0.01) 40%,
+    transparent 70%
+  );
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 1.5s cubic-bezier(0.22, 1, 0.36, 1);
+  z-index: 0;
+}
+
+.textGlowActive {
+  opacity: 1;
+}
