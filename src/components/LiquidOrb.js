@@ -13,9 +13,9 @@ export default function LiquidOrb({ size = 200, spark = false, intense = false }
           animate={{
             scale: [1, 1.1, 1],
             boxShadow: [
-              '0 0 10px white, 0 0 20px #7DD3FC',
-              '0 0 15px white, 0 0 30px #FCD34D',
-              '0 0 10px white, 0 0 20px #7DD3FC',
+              '0 0 20px rgba(255, 255, 255, 0.3), 0 0 40px rgba(125, 211, 252, 0.2)',
+              '0 0 30px rgba(255, 255, 255, 0.5), 0 0 50px rgba(252, 211, 77, 0.3)',
+              '0 0 20px rgba(255, 255, 255, 0.3), 0 0 40px rgba(125, 211, 252, 0.2)',
             ]
           }}
           transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}

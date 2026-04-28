@@ -47,7 +47,7 @@
   background: #F1F1F1;
   border-radius: 50%;
   z-index: 10;
-  box-shadow: 0 0 15px rgba(255, 215, 0, 0.6); /* Exact spec shadow */
+  box-shadow: 0 0 30px rgba(255, 255, 255, 0.4); /* Larger outer glow */
   border: 1px solid rgba(255, 255, 255, 0.8);
 }
 

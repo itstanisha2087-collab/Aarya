@@ -19,9 +19,7 @@ import {
 
 export default function Dashboard() {
   const [isSidebarExpanded, setIsSidebarExpanded] = useState(false);
-  const [messages, setMessages] = useState([
-    { role: 'aarya', text: 'hum yahi hain, hamesha.' }
-  ]);
+  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [isThinking, setIsThinking] = useState(false);
   const chatEndRef = useRef(null);
@@ -42,7 +40,7 @@ export default function Dashboard() {
   };
 
   const resetChat = () => {
-    setMessages([{ role: 'aarya', text: 'hum yahi hain, hamesha.' }]);
+    setMessages([]);
   };
 
   const pastVibes = [
@@ -118,7 +116,7 @@ export default function Dashboard() {
       <main className={styles.main}>
         <div className={styles.anchorWrapper}>
           <div className={styles.orbHitbox}>
-            <LiquidOrb size={26} spark />
+            <LiquidOrb size={42} spark />
           </div>
           <motion.div 
             className={styles.greetingWrapper}
