@@ -47,18 +47,6 @@ const ParticleMorph = forwardRef(function ParticleMorph({ onGridFormed, mode = '
           p.breatheOffset = i * 0.4;
           p.breatheCenterX = cx;
           p.breatheCenterY = cy;
-        } else if (newMode === 'chat-shrink') {
-          // Animate grid to top-right corner
-          const cornerX = window.innerWidth - 80;
-          const cornerY = 60;
-          const miniSpacing = 10;
-          const gridPos = getGridPositions(GRID_SIZE, miniSpacing, cornerX, cornerY);
-          if (gridPos[i]) {
-            p.targetX = gridPos[i].x;
-            p.targetY = gridPos[i].y;
-            p.baseSize = 2;
-            p.phase = 'converge';
-          }
         } else {
           // idle - return to center grid
           p.targetX = gridPos[i].x;
@@ -84,9 +72,16 @@ const ParticleMorph = forwardRef(function ParticleMorph({ onGridFormed, mode = '
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
 
+    const getContainerSize = () => {
+      const parent = canvas.parentElement;
+      if (parent) {
+        return { w: parent.clientWidth, h: parent.clientHeight };
+      }
+      return { w: window.innerWidth, h: window.innerHeight };
+    };
+
     const resize = () => {
-      const w = window.innerWidth;
-      const h = window.innerHeight;
+      const { w, h } = getContainerSize();
       canvas.width = w * dpr;
       canvas.height = h * dpr;
       canvas.style.width = w + 'px';
@@ -95,8 +90,7 @@ const ParticleMorph = forwardRef(function ParticleMorph({ onGridFormed, mode = '
     resize();
     window.addEventListener('resize', resize);
 
-    const width = window.innerWidth;
-    const height = window.innerHeight;
+    const { w: width, h: height } = getContainerSize();
     const centerX = width / 2;
     const centerY = height / 2;
     gridCenterRef.current = { x: centerX, y: centerY };
@@ -151,8 +145,9 @@ const ParticleMorph = forwardRef(function ParticleMorph({ onGridFormed, mode = '
     const animate = (now) => {
       const elapsed = now - startTime;
       const dprVal = window.devicePixelRatio || 1;
+      const { w: cw, h: ch } = getContainerSize();
       ctx.setTransform(dprVal, 0, 0, dprVal, 0, 0);
-      ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+      ctx.clearRect(0, 0, cw, ch);
 
       // Phase management
       if (elapsed < 300) {
@@ -218,7 +213,7 @@ const ParticleMorph = forwardRef(function ParticleMorph({ onGridFormed, mode = '
         });
 
         // Draw subtle connection lines between adjacent grid particles
-        if (modeRef.current !== 'chat-shrink') {
+        if (true) {
           ctx.save();
           ctx.strokeStyle = 'rgba(255,255,255,0.04)';
           ctx.lineWidth = 0.5;
