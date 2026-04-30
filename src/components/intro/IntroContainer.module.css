@@ -1,0 +1,53 @@
+.container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background-color: #000;
+  overflow: hidden;
+  z-index: 50;
+}
+
+.meteoroidContainer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.textContainer {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-family: 'Inter', sans-serif;
+  font-size: 6rem;
+  font-weight: 900; /* font-black equivalent */
+  letter-spacing: 1.5rem; /* Increased spacing */
+  color: #ffffff;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.letter {
+  display: inline-block;
+  /* Minimal sharp glow */
+  text-shadow: 0 0 15px rgba(255, 255, 255, 0.5);
+}
+
+.canvasContainer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 4;
+  pointer-events: none;
+}

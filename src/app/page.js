@@ -2,14 +2,14 @@
 
 import { useState, useCallback } from 'react';
 import { AnimatePresence } from 'framer-motion';
-import CometEntry from '@/components/CometEntry';
-import ReactiveGrid from '@/components/ReactiveGrid';
+import IntroContainer from '@/components/intro/IntroContainer';
+import ChatInterface from '@/components/ChatInterface';
 
 export default function Home() {
-  const [phase, setPhase] = useState('comet'); // 'comet' | 'grid'
+  const [phase, setPhase] = useState('intro'); // 'intro' | 'chat'
 
-  const handleCometComplete = useCallback(() => {
-    setPhase('grid');
+  const handleIntroComplete = useCallback(() => {
+    setPhase('chat');
   }, []);
 
   return (
@@ -23,13 +23,13 @@ export default function Home() {
       }}
     >
       <AnimatePresence mode="wait">
-        {phase === 'comet' && (
-          <CometEntry key="comet" onComplete={handleCometComplete} />
+        {phase === 'intro' && (
+          <IntroContainer key="intro" onComplete={handleIntroComplete} />
         )}
       </AnimatePresence>
 
-      {phase === 'grid' && (
-        <ReactiveGrid key="grid" />
+      {phase === 'chat' && (
+        <ChatInterface key="chat" />
       )}
     </main>
   );

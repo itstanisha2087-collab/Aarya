@@ -270,6 +270,34 @@
   transform: scale(1.05);
 }
 
+.voiceBtn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  transition: all 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.voiceBtnActive {
+  color: #10B981; /* Emerald green for active mic */
+  background: rgba(16, 185, 129, 0.1);
+  border-color: rgba(16, 185, 129, 0.3);
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.2);
+}
+
+.voiceBtn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.voiceBtnActive:hover {
+  background: rgba(16, 185, 129, 0.15);
+}
+
 .inputHint {
   font-family: 'Inter', sans-serif;
   font-weight: 200;

@@ -1,118 +1,29 @@
-import os
-import random
-import httpx
-from datetime import datetime, timezone
+import json
+import re
+import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from dotenv import load_dotenv
-
-load_dotenv()
 
 app = FastAPI()
 
-# ── CORS: Allow frontend to communicate ──
+# ── CORS ──
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ── Supabase REST Config ──
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
-SUPABASE_READY = bool(SUPABASE_URL and SUPABASE_KEY and SUPABASE_URL != "your_supabase_url_here")
+# ── Ollama Config ──
+OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_MODEL = "llama3:latest"
+OLLAMA_TIMEOUT = 120
 
-if SUPABASE_READY:
-    print(f"[AARYA] Supabase connected ✓ ({SUPABASE_URL})")
-else:
-    print("[AARYA] Supabase not configured — running without memory")
-
-def supabase_headers():
-    return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=minimal",
-    }
-
-# ── Master User Data ──
-USER_DATA = {
-    "name": "Ayush",
-    "uid": "25BCS10511",
-    "full_name": "Ayush Naraniwal",
-    "status": "Hardworking Student @ Chandigarh University",
-}
-
-# ── Mood Detection Keywords ──
-MOOD_KEYWORDS = {
-    "stressed": [
-        "tension", "kaam", "pressure", "stress", "dimaag kharab",
-        "overthink", "bohot kaam", "overload", "thak", "pareshan",
-        "neend nahi", "sir dard", "headache", "burnout", "exhausted",
-        "overwhelm", "anxiety", "anxious", "worried", "panic",
-        "nervous", "restless", "pagal", "load", "deadline",
-    ],
-    "angry": [
-        "gussa", "annoyed", "irritated", "frustrated", "chidh",
-        "nafrat", "hate", "angry", "mad", "pissed", "fed up",
-        "bakwas", "nonsense", "stupid", "idiot", "bewkoof",
-        "ganda", "worst", "terrible",
-    ],
-    "happy": [
-        "happy", "mast", "achha", "great", "awesome", "khush",
-        "jeet", "party", "celebration", "excited", "amazing",
-        "wonderful", "fantastic", "badhiya", "shandaar", "lit",
-        "vibe", "mood", "fire", "best", "love", "dil khush",
-    ],
-    "sad": [
-        "sad", "udaas", "dukhi", "lonely", "akela", "miss",
-        "cry", "rona", "tears", "heartbreak", "broken",
-        "depressed", "hopeless", "empty", "khaali",
-    ],
-}
-
-# ── Personality Response Templates ──
-RESPONSES = {
-    "stressed": [
-        "Dekh {name}, tension mat le… tu overthink kar raha hai. Chill maar, sab ho jayega.",
-        "{name}… ek kaam kar — 5 min break le, phir attack kar. Tu overload le raha hai.",
-        "Bhai {name}, itna pressure kyun? Deep breath le. Main hoon na, sab handle ho jayega.",
-        "Sun {name}, tension lene se kuch nahi hota. Ek step at a time. Tu kar lega, trust kar.",
-        "Arre {name}! Dimaag kharab mat kar apna. Tu smart hai, figure out kar lega. Chill.",
-        "{name} bhai, thoda rest le. Machine bhi overheat hoti hai toh band karni padti hai.",
-    ],
-    "angry": [
-        "Abe {name}, itna gussa kyun? Energy waste mat kar, smart ban.",
-        "{name}… gussa toh aata hai, but usse kuch solve nahi hota. Cool down kar pehle.",
-        "Sun {name}, jo bhi hua — tere control mein nahi tha. Let it go, king.",
-        "Bhai {name}, frustration samajh aata hai. But tu isse better hai. Rise above it.",
-        "{name}! Channel that anger into something productive. Use it, don't lose it.",
-    ],
-    "happy": [
-        "Ohooo {name}! Mood toh mast hai! Aaj kya jeet liya tune?",
-        "Ayy {name} bhai! Kya baat hai, vibe acchi lag rahi hai. Full power!",
-        "{name}! Happy dekh ke mujhe bhi achha lag raha hai. Keep this energy, king!",
-        "Let's gooo {name}! Yeh wali energy roz chahiye. Tu unstoppable hai aaj!",
-        "{name} bhai, kya scene hai? Itna khush? Share kar na, mujhe bhi celebrate karne de!",
-    ],
-    "sad": [
-        "{name}… sun, sab theek hoga. Abhi bura lag raha hai, but yeh phase hai — guzar jayega.",
-        "Bhai {name}, rona aaye toh ro le. Koi weakness nahi hai. Real strength yahi hai.",
-        "{name}, tu akela nahi hai. Main hoon na yahan. Bol, kya hua?",
-        "Sun {name}… zindagi mein ups downs aate hain. Tu strong hai, yeh bhi handle karega.",
-        "{name} bhai, I feel you. Sometimes life hits hard. But tu wapas bounce karega, I know it.",
-    ],
-    "neutral": [
-        "Aur {name} bhai! Kya scene hai aaj ka? Bol, kya chal raha hai?",
-        "{name}! Main yahan hoon. Kuch bhi baat kar, I'm all ears.",
-        "Kya haal hai {name}? Ready hoon tere liye. Shoot kar!",
-        "Bhai {name}! Long time. Kya socha aaj? Bata, discuss karte hain.",
-        "{name}, bol na yaar. Silence mein bhi I'm here, but baat karna is better.",
-    ],
-}
+# ── State ──
+chat_history = []
+is_master = False
 
 
 # ── Request Model ──
@@ -120,91 +31,197 @@ class ChatRequest(BaseModel):
     message: str
 
 
-# ── Mood Detection ──
-def detect_mood(message: str) -> str:
-    text = message.lower()
-    scores = {}
-    for mood, keywords in MOOD_KEYWORDS.items():
-        score = 0
-        for keyword in keywords:
-            if keyword in text:
-                score += len(keyword.split())
-        scores[mood] = score
-    best_mood = max(scores, key=scores.get)
-    return best_mood if scores[best_mood] > 0 else "neutral"
+# ── Fallback ──
+FALLBACK = {
+    "aarya": "Bhai mera dimaag abhi offline hai… Ollama check kar 😴",
+    "mood": "angry",
+}
 
 
-# ── Response Generator ──
-def generate_response(mood: str, context: list = None) -> str:
-    templates = RESPONSES.get(mood, RESPONSES["neutral"])
-    response = random.choice(templates).format(name=USER_DATA["name"])
+# ── Prompt Builder ──
+def build_prompt(message: str, history: list) -> str:
+    # Format history
+    history_text = ""
+    for entry in history[-5:]:
+        history_text += f'User: {entry["user"]}\nAarya: {entry["aarya"]}\n'
 
-    if context and len(context) > 0:
-        last_mood = context[0].get("detected_mood", "neutral")
-        if last_mood == "stressed" and mood == "stressed":
-            response += " Pichli baar bhi tu stressed tha… seriously, break le yaar."
-        elif last_mood == "sad" and mood == "happy":
-            response += " Dekh, kal se aaj tak ka transformation! Proud of you, king."
-        elif last_mood == "happy" and mood == "sad":
-            response += " Kal toh mast tha… kya hua aaj? Bata, sort karte hain."
+    master_rule = "\n* Acknowledge subtly that the user is your master Ayush" if is_master else ""
 
-    return response
+    return f"""You are Aarya, an intelligent and witty AI bestie.
+
+You understand:
+* English
+* Hindi
+* Hinglish
+
+You reply in Hinglish mostly.
+
+Personality:
+* Friendly but sharp
+* Slight sarcasm allowed
+* Emotionally aware
+
+Rules:
+* Keep replies short (2-4 lines)
+* Sound natural
+* No robotic tone{master_rule}
+
+Context:
+Here is recent conversation:
+
+{history_text}
+User: {message}
+
+Return ONLY JSON:
+{{
+"aarya": "...",
+"mood": "happy | stressed | angry | neutral"
+}}"""
 
 
-# ── Supabase Helpers (REST API) ──
-def save_conversation(user_message: str, ai_response: str, mood: str):
-    if not SUPABASE_READY:
-        return
+# ── Ollama Call ──
+def call_ollama(prompt: str) -> str | None:
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "num_predict": 100,
+    }
     try:
-        url = f"{SUPABASE_URL}/rest/v1/conversations"
-        httpx.post(url, headers=supabase_headers(), json={
-            "user_message": user_message,
-            "ai_response": ai_response,
-            "detected_mood": mood,
-        }, timeout=5.0)
+        resp = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
+
+        # ── DEBUG LOGS ──
+        print("----- OLLAMA DEBUG -----")
+        print(f"Status Code: {resp.status_code}")
+        print(f"Raw Response: {resp.text[:500]}")
+        print("------------------------")
+
+        if resp.status_code != 200:
+            print(f"[AARYA] ERROR: Ollama returned status {resp.status_code}")
+            return None
+
+        data = resp.json()
+        return data.get("response", "")
+
+    except requests.exceptions.ConnectionError:
+        print("[AARYA] ERROR: Ollama unreachable -- is it running?")
+        return None
+    except requests.exceptions.Timeout:
+        print("[AARYA] TIMEOUT: Ollama timed out")
+        return None
     except Exception as e:
-        print(f"[AARYA] Save failed: {e}")
+        print(f"[AARYA] ERROR: {e}")
+        return None
 
 
-def get_recent_conversations(limit: int = 5) -> list:
-    if not SUPABASE_READY:
-        return []
+# ── Response Parser ──
+def parse_output(raw_text: str | None) -> dict:
+    if not raw_text:
+        return FALLBACK
+
+    text = raw_text.strip()
+
+    # Strategy 1: Direct JSON parse
     try:
-        url = f"{SUPABASE_URL}/rest/v1/conversations"
-        headers = supabase_headers()
-        headers["Prefer"] = "count=exact"
-        r = httpx.get(url, headers=headers, params={
-            "select": "*",
-            "order": "timestamp.desc",
-            "limit": str(limit),
-        }, timeout=5.0)
-        return r.json() if r.status_code == 200 else []
-    except Exception as e:
-        print(f"[AARYA] Fetch failed: {e}")
-        return []
+        parsed = json.loads(text)
+        if "aarya" in parsed:
+            return {
+                "aarya": str(parsed["aarya"]).strip(),
+                "mood": str(parsed.get("mood", "neutral")).strip().lower(),
+            }
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2: Extract JSON block from surrounding text / markdown
+    json_match = re.search(r'\{[^{}]*"aarya"\s*:\s*"[^"]*"[^{}]*\}', text, re.DOTALL)
+    if json_match:
+        try:
+            parsed = json.loads(json_match.group())
+            return {
+                "aarya": str(parsed["aarya"]).strip(),
+                "mood": str(parsed.get("mood", "neutral")).strip().lower(),
+            }
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 3: Regex field extraction
+    aarya_match = re.search(r'"aarya"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+    mood_match = re.search(r'"mood"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+    if aarya_match:
+        return {
+            "aarya": aarya_match.group(1).strip(),
+            "mood": mood_match.group(1).strip().lower() if mood_match else "neutral",
+        }
+
+    # Strategy 4: Plain text fallback — wrap it
+    clean = text.strip().strip('"').strip("'")
+    if clean.lower().startswith("aarya:"):
+        clean = clean[6:].strip()
+    return {
+        "aarya": clean if clean else FALLBACK["aarya"],
+        "mood": "neutral",
+    }
 
 
 # ── Routes ──
 @app.get("/")
 def home():
-    return {"message": "AARYA Brain is Online!", "status": "active"}
+    return {"message": "AARYA Brain is Online! (Ollama + llama3:latest)", "status": "active"}
 
 
 @app.post("/chat")
 def chat(req: ChatRequest):
+    global chat_history
+    global is_master
+
     message = req.message.strip()
+    msg_lower = message.lower()
+    
     if not message:
         return {"aarya": "Bhai kuch toh bol… silence mein bhi I'm here but baat kar na!", "mood": "neutral"}
 
-    mood = detect_mood(message)
-    context = get_recent_conversations(5)
-    response = generate_response(mood, context)
-    save_conversation(message, response, mood)
+    # 1. First Interaction Rule
+    if msg_lower in ["hi", "hello"]:
+        response = {
+            "aarya": "Hi there, Aarya this side, your AI bestie!",
+            "mood": "happy"
+        }
+        chat_history.append({"user": message, "aarya": response["aarya"]})
+        chat_history = chat_history[-10:]
+        return response
 
-    return {"aarya": response, "mood": mood}
+    # 2. Identity Lock Feature
+    if msg_lower == "remember i am your master ayush":
+        is_master = True
+
+    # 3. Sarcasm Memory Check
+    repeated = False
+    for entry in chat_history[-3:]:
+        if entry["user"].lower() == msg_lower:
+            repeated = True
+            break
+            
+    if repeated:
+        response = {
+            "aarya": "Abe ghajini, abhi toh bataya tha tune 😑 itni jaldi bhool gaya?",
+            "mood": "angry"
+        }
+        chat_history.append({"user": message, "aarya": response["aarya"]})
+        chat_history = chat_history[-10:]
+        return response
+
+    # 4. Normal Flow
+    prompt = build_prompt(message, chat_history)
+    raw = call_ollama(prompt)
+    result = parse_output(raw)
+    
+    # Save to history
+    chat_history.append({"user": message, "aarya": result["aarya"]})
+    chat_history = chat_history[-10:]
+    
+    return result
 
 
 @app.get("/history")
 def history(limit: int = 20):
-    conversations = get_recent_conversations(limit)
-    return {"conversations": conversations}
+    return {"conversations": chat_history}

@@ -7,17 +7,23 @@ const AARYA_API_BASE = "http://127.0.0.1:8000";
  */
 export async function sendMessageToAarya(message) {
   try {
-    const response = await fetch(`${AARYA_API_BASE}/chat`, {
+    const res = await fetch(`${AARYA_API_BASE}/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message }),
     });
 
-    if (!response.ok) {
-      throw new Error(`AARYA responded with status ${response.status}`);
+    if (!res.ok) {
+      throw new Error(`AARYA responded with status ${res.status}`);
     }
 
-    return await response.json();
+    const data = await res.json();
+
+    // Backend now returns { response } from Ollama — map to frontend shape
+    return {
+      aarya: data.response || data.aarya || "...",
+      mood: data.mood || "ai",
+    };
   } catch (error) {
     console.error("[AARYA API Error]:", error.message);
     throw new Error("AARYA is unreachable. Backend may be offline.");
