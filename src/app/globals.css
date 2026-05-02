@@ -76,3 +76,74 @@ input, textarea {
   background: rgba(255, 255, 255, 0.15);
   color: var(--white);
 }
+
+/* ── Markdown Content Styling ── */
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 12px 0;
+  background: var(--bg-elevated);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+th, td {
+  border: 1px solid var(--white-border);
+  padding: 10px 14px;
+  text-align: left;
+}
+
+th {
+  background-color: var(--white-ghost);
+  font-weight: 500;
+  color: var(--white);
+}
+
+tr:nth-child(even) {
+  background-color: rgba(255, 255, 255, 0.02);
+}
+
+.message-text {
+  line-height: 1.6;
+  width: 100%;
+}
+
+.message-text p {
+  margin-bottom: 8px;
+}
+
+.message-text p:last-child {
+  margin-bottom: 0;
+}
+
+.message-text ul, .message-text ol {
+  margin-left: 20px;
+  margin-bottom: 12px;
+}
+
+.message-text hr {
+  border: none;
+  border-top: 1px solid var(--white-border);
+  margin: 16px 0;
+}
+
+.message-text pre {
+  background-color: rgba(0, 0, 0, 0.3);
+  padding: 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  border: 1px solid var(--white-border);
+  margin: 10px 0;
+}
+
+.message-text code {
+  font-family: monospace;
+  background-color: rgba(255, 255, 255, 0.1);
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.message-text pre code {
+  background-color: transparent;
+  padding: 0;
+}

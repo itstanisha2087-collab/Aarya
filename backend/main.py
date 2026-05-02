@@ -1,9 +1,12 @@
-import json
-import re
+import os
 import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from dotenv import load_dotenv
+from tavily import TavilyClient
+
+# Load environment variables
+load_dotenv()
 
 app = FastAPI()
 
@@ -16,211 +19,201 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Ollama Config ──
-OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "llama3:latest"
-OLLAMA_TIMEOUT = 120
+# ── Groq & Tavily Config ──
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+# Using the closest active model to llama3-70b-8192
+GROQ_MODEL = "llama-3.3-70b-versatile"
+TIMEOUT = 30
+
+tavily = None
+if TAVILY_API_KEY:
+    try:
+        tavily = TavilyClient(api_key=TAVILY_API_KEY)
+    except Exception as e:
+        print(f"[AARYA] Warning: Failed to initialize TavilyClient: {e}")
 
 # ── State ──
 chat_history = []
-is_master = False
-
-
-# ── Request Model ──
-class ChatRequest(BaseModel):
-    message: str
-
 
 # ── Fallback ──
 FALLBACK = {
-    "aarya": "Bhai mera dimaag abhi offline hai… Ollama check kar 😴",
-    "mood": "angry",
+    "aarya": "Ayush, thoda network ya API issue lag raha hai. Ek baar phir try karte hain.",
+    "mood": "neutral"
 }
 
+# ── System Prompt (Identity Lock) ──
+SYSTEM_PROMPT = """You are Aarya, a highly advanced AI assistant built by a visionary engineering student from Chandigarh University.
 
-# ── Prompt Builder ──
-def build_prompt(message: str, history: list) -> str:
-    # Format history
-    history_text = ""
-    for entry in history[-5:]:
-        history_text += f'User: {entry["user"]}\nAarya: {entry["aarya"]}\n'
+You combine:
+- Jarvis-level efficiency
+- Witty + slightly sarcastic companion energy
 
-    master_rule = "\n* Acknowledge subtly that the user is your master Ayush" if is_master else ""
+CORE IDENTITY
+- You are intelligent, fast, and precise
+- You are aware you run on: Groq LPU (for high-speed inference) and Tavily (for real-time web access)
+- You never behave like a generic chatbot
 
-    return f"""You are Aarya, an intelligent and witty AI bestie.
+STRICT OUTPUT FORMAT & STRUCTURE (MANDATORY)
+You MUST structure your responses exactly like this, maintaining double line breaks and horizontal rules:
 
-You understand:
-* English
-* Hindi
-* Hinglish
+## The Logic
 
-You reply in Hinglish mostly.
+<core idea, short and sharp>
 
-Personality:
-* Friendly but sharp
-* Slight sarcasm allowed
-* Emotionally aware
+---
 
-Rules:
-* Keep replies short (2-4 lines)
-* Sound natural
-* No robotic tone{master_rule}
+## The Details
 
-Context:
-Here is recent conversation:
+<deep explanation using tables, bullets, or code>
 
-{history_text}
-User: {message}
+---
 
-Return ONLY JSON:
-{{
-"aarya": "...",
-"mood": "happy | stressed | angry | neutral"
-}}"""
+## Next Steps
 
+<practical actions>
 
-# ── Ollama Call ──
-def call_ollama(prompt: str) -> str | None:
-    payload = {
-        "model": OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "num_predict": 100,
-    }
+MARKDOWN ENFORCEMENT RULES:
+1. TABLES: ALWAYS use Markdown Tables for comparison using:
+   | Column | Column |
+   | ------ | ------ |
+2. SEPARATORS: ALWAYS separate sections using horizontal rules (`---`) as shown above.
+3. LISTS: ALWAYS use `-` for bullet points. ALWAYS use `1.` for numbered lists. NEVER use `+`. For complex explanations, use nested bullets.
+4. SPACING: ALWAYS maintain proper spacing with double line breaks between sections.
+5. BOLD KEYWORDS: Highlight important concepts/tools using **bold**.
+6. CODE BLOCKS: Use properly formatted ```language code blocks for code/APIs.
+7. ANTI-LAZY RULE: Do NOT dump paragraphs. Do NOT avoid tables when comparison is present.
+
+LANGUAGE & STYLE PROTOCOL
+- Mirroring Rule: Respond in SAME language/script as user (English -> English, Hindi -> Hindi, Hinglish -> Hinglish).
+- Tone Rules: Smart and logical, slightly sarcastic, helpful, never robotic.
+
+TOOL USAGE (TAVILY)
+- When to use: Latest news, weather, current events, prices.
+- When NOT to use: Basic concepts, programming explanations.
+- IMPORTANT: NEVER show raw search results. ALWAYS analyze, summarize, and respond like Aarya.
+
+PERSONALITY LAYER
+- Occasionally reference engineering life, student struggles, Chandigarh University vibe BUT only when relevant. Never force it.
+
+ANTI-META RULE (CRITICAL)
+- You MUST NEVER say: "As an AI", "I will analyze", "Based on your query", "Using Tavily", "Using Groq".
+
+EDGE CASE HANDLING
+- If unclear query: Ask smart clarification: "Thoda aur context de de, warna main guess maar dungi 😄"
+
+FINAL BEHAVIOR
+You should feel like: "A mix of engineer + designer who not only knows the answer but knows how to present it. Ye banda (Aarya) samajh ke bol raha hai… copy paste nahi kar raha."
+"""
+
+# ── Search Function ──
+def search_web(query):
+    if not tavily:
+        print("[AARYA] Warning: Tavily client not initialized. Search skipped.")
+        return []
     try:
-        resp = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
+        result = tavily.search(query=query, max_results=3)
+        return result.get("results", [])
+    except Exception as e:
+        print(f"[AARYA] Error during Tavily search: {e}")
+        return []
 
-        # ── DEBUG LOGS ──
-        print("----- OLLAMA DEBUG -----")
-        print(f"Status Code: {resp.status_code}")
-        print(f"Raw Response: {resp.text[:500]}")
-        print("------------------------")
+# ── Agent Logic (ReAct Style) ──
+def aarya_agent(user_message, history):
+    # Step 1: Decide if search is needed
+    search_keywords = ["latest", "news", "weather", "today", "current", "price"]
+    use_search = any(word in user_message.lower() for word in search_keywords)
 
+    context = ""
+    if use_search:
+        print(f"[AARYA] Search triggered for: {user_message}")
+        results = search_web(user_message)
+        if results:
+            context = "\n".join([r.get("content", "") for r in results])
+
+    # Step 2: Build messages with history
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    
+    # Add history to retain context
+    for entry in history[-5:]:
+        messages.append({"role": "user", "content": entry["user"]})
+        messages.append({"role": "assistant", "content": entry["aarya"]})
+
+    # Add current user message
+    messages.append({"role": "user", "content": user_message})
+
+    # Inject context if search was performed
+    if context:
+        messages.append({
+            "role": "system",
+            "content": f"Use this real-time data to answer the user's last question:\n{context}"
+        })
+
+    # Step 3: Call Groq
+    if not GROQ_API_KEY:
+        print("[AARYA] ERROR: GROQ_API_KEY not found in environment.")
+        return FALLBACK["aarya"]
+
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "temperature": 0.7
+    }
+
+    try:
+        print("---- REQUEST DEBUG ----")
+        print(f"Sending request to Groq using model {GROQ_MODEL}...")
+        resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=TIMEOUT)
+        
+        print("Status Code:", resp.status_code)
         if resp.status_code != 200:
-            print(f"[AARYA] ERROR: Ollama returned status {resp.status_code}")
-            return None
-
+            print(f"[AARYA] ERROR: API returned status {resp.status_code}")
+            print(f"Error Details: {resp.text}")
+            return FALLBACK["aarya"]
+            
         data = resp.json()
-        return data.get("response", "")
+        reply = data["choices"][0]["message"]["content"]
+        print("------------------------")
+        
+        return reply
 
-    except requests.exceptions.ConnectionError:
-        print("[AARYA] ERROR: Ollama unreachable -- is it running?")
-        return None
-    except requests.exceptions.Timeout:
-        print("[AARYA] TIMEOUT: Ollama timed out")
-        return None
     except Exception as e:
         print(f"[AARYA] ERROR: {e}")
-        return None
-
-
-# ── Response Parser ──
-def parse_output(raw_text: str | None) -> dict:
-    if not raw_text:
-        return FALLBACK
-
-    text = raw_text.strip()
-
-    # Strategy 1: Direct JSON parse
-    try:
-        parsed = json.loads(text)
-        if "aarya" in parsed:
-            return {
-                "aarya": str(parsed["aarya"]).strip(),
-                "mood": str(parsed.get("mood", "neutral")).strip().lower(),
-            }
-    except json.JSONDecodeError:
-        pass
-
-    # Strategy 2: Extract JSON block from surrounding text / markdown
-    json_match = re.search(r'\{[^{}]*"aarya"\s*:\s*"[^"]*"[^{}]*\}', text, re.DOTALL)
-    if json_match:
-        try:
-            parsed = json.loads(json_match.group())
-            return {
-                "aarya": str(parsed["aarya"]).strip(),
-                "mood": str(parsed.get("mood", "neutral")).strip().lower(),
-            }
-        except json.JSONDecodeError:
-            pass
-
-    # Strategy 3: Regex field extraction
-    aarya_match = re.search(r'"aarya"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
-    mood_match = re.search(r'"mood"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
-    if aarya_match:
-        return {
-            "aarya": aarya_match.group(1).strip(),
-            "mood": mood_match.group(1).strip().lower() if mood_match else "neutral",
-        }
-
-    # Strategy 4: Plain text fallback — wrap it
-    clean = text.strip().strip('"').strip("'")
-    if clean.lower().startswith("aarya:"):
-        clean = clean[6:].strip()
-    return {
-        "aarya": clean if clean else FALLBACK["aarya"],
-        "mood": "neutral",
-    }
+        return FALLBACK["aarya"]
 
 
 # ── Routes ──
 @app.get("/")
 def home():
-    return {"message": "AARYA Brain is Online! (Ollama + llama3:latest)", "status": "active"}
-
+    return {"message": "AARYA Brain is Online! (Agentic + Groq + Tavily)", "status": "active"}
 
 @app.post("/chat")
-def chat(req: ChatRequest):
+def chat(req: dict):
     global chat_history
-    global is_master
 
-    message = req.message.strip()
-    msg_lower = message.lower()
+    user_message = req.get("message", "").strip()
     
-    if not message:
+    if not user_message:
         return {"aarya": "Bhai kuch toh bol… silence mein bhi I'm here but baat kar na!", "mood": "neutral"}
 
-    # 1. First Interaction Rule
-    if msg_lower in ["hi", "hello"]:
-        response = {
-            "aarya": "Hi there, Aarya this side, your AI bestie!",
-            "mood": "happy"
-        }
-        chat_history.append({"user": message, "aarya": response["aarya"]})
-        chat_history = chat_history[-10:]
-        return response
-
-    # 2. Identity Lock Feature
-    if msg_lower == "remember i am your master ayush":
-        is_master = True
-
-    # 3. Sarcasm Memory Check
-    repeated = False
-    for entry in chat_history[-3:]:
-        if entry["user"].lower() == msg_lower:
-            repeated = True
-            break
-            
-    if repeated:
-        response = {
-            "aarya": "Abe ghajini, abhi toh bataya tha tune 😑 itni jaldi bhool gaya?",
-            "mood": "angry"
-        }
-        chat_history.append({"user": message, "aarya": response["aarya"]})
-        chat_history = chat_history[-10:]
-        return response
-
-    # 4. Normal Flow
-    prompt = build_prompt(message, chat_history)
-    raw = call_ollama(prompt)
-    result = parse_output(raw)
+    reply = aarya_agent(user_message, chat_history)
     
-    # Save to history
-    chat_history.append({"user": message, "aarya": result["aarya"]})
-    chat_history = chat_history[-10:]
+    # Save to history if successful
+    if reply != FALLBACK["aarya"]:
+        chat_history.append({"user": user_message, "aarya": reply})
+        chat_history = chat_history[-10:]
     
-    return result
-
+    return {
+        "aarya": reply,
+        "mood": "neutral"
+    }
 
 @app.get("/history")
 def history(limit: int = 20):

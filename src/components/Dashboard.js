@@ -12,7 +12,6 @@ import {
   Sparkles, 
   Plus, 
   Image, 
-  Mic, 
   PlusCircle, 
   User 
 } from 'lucide-react';
@@ -154,9 +153,6 @@ export default function Dashboard() {
         <div className={styles.capsule}>
           <button className={styles.inputAction} aria-label="Upload Image">
             <Image size={16} strokeWidth={1.5} />
-          </button>
-          <button className={styles.inputAction} aria-label="Voice Message">
-            <Mic size={16} strokeWidth={1.5} />
           </button>
           
           <input 

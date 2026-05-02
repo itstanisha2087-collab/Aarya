@@ -2,3 +2,5 @@ fastapi
 uvicorn
 requests
 pydantic
+python-dotenv
+tavily-python
