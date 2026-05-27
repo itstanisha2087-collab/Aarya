@@ -4,11 +4,75 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { sendMessageToAarya } from '@/lib/api';
+import { sendMessageToAarya, transcribeAudio, sendHeartbeat, checkWakeStatus } from '@/lib/api';
+import { speakText, stopSpeaking, setVoiceEnabled, isVoiceEnabled } from '@/lib/voice';
+import { startWakeWord, stopWakeWord, isWakeWordSupported } from '@/lib/wakeWord';
 import HistoryPanel from './HistoryPanel';
 import styles from './ChatInterface.module.css';
 
+// ── Web Audio API dual-pitch Jarvis chime generator ──
+function playJarvisBeep() {
+  if (typeof window === 'undefined') return;
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    const ctx = new AudioContext();
+    
+    // First high-pitch chime (A5)
+    const osc1 = ctx.createOscillator();
+    const gain1 = ctx.createGain();
+    osc1.type = 'sine';
+    osc1.frequency.setValueAtTime(880, ctx.currentTime);
+    gain1.gain.setValueAtTime(0.0, ctx.currentTime);
+    gain1.gain.linearRampToValueAtTime(0.15, ctx.currentTime + 0.05);
+    gain1.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.25);
+    osc1.connect(gain1);
+    gain1.connect(ctx.destination);
+    osc1.start();
+    osc1.stop(ctx.currentTime + 0.25);
+
+    // Second higher-pitch chime (C#6) delayed by 120ms
+    setTimeout(() => {
+      try {
+        const osc2 = ctx.createOscillator();
+        const gain2 = ctx.createGain();
+        osc2.type = 'sine';
+        osc2.frequency.setValueAtTime(1100, ctx.currentTime);
+        gain2.gain.setValueAtTime(0.0, ctx.currentTime);
+        gain2.gain.linearRampToValueAtTime(0.15, ctx.currentTime + 0.05);
+        gain2.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.3);
+        osc2.connect(gain2);
+        gain2.connect(ctx.destination);
+        osc2.start();
+        osc2.stop(ctx.currentTime + 0.3);
+      } catch (e) {
+        console.warn(e);
+      }
+    }, 120);
+  } catch (e) {
+    console.warn('[AARYA] Web Audio chime failed:', e);
+  }
+}
+
+// ── Native HTML5 Notification Alert Fallback ──
+function triggerWakeNotification() {
+  if (typeof window === 'undefined') return;
+  if (!('Notification' in window)) return;
+  
+  if (Notification.permission === 'granted') {
+    const notification = new Notification("AARYA", {
+      body: "Haan Ayush! I am listening. Bol, kya chal raha hai? 🎙️",
+      requireInteraction: false
+    });
+    notification.onclick = () => {
+      window.focus();
+      notification.close();
+    };
+  }
+}
+
 export default function ChatInterface() {
+  // ── Core Chat State ──
   const [messages, setMessages] = useState([
     {
       id: 'welcome-0',
@@ -21,27 +85,54 @@ export default function ChatInterface() {
   const [inputValue, setInputValue] = useState('');
   const [loading, setLoading] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
-  const messagesEndRef = useRef(null);
-  const inputRef = useRef(null);
 
-  // Auto-focus input on mount
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      if (inputRef.current) inputRef.current.focus();
-    }, 800);
-    return () => clearTimeout(timer);
+  // ── Voice State ──
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [voiceOn, setVoiceOn] = useState(true);
+  const [wakeGlow, setWakeGlow] = useState(false);   // wake word detection glow
+
+  // ── Input Mode Routing ──
+  // Tracks whether the current interaction originated from voice or keyboard.
+  // voiceModeRef mirrors isVoiceMode so async handlers read the non-stale value.
+  const [isVoiceMode, setIsVoiceMode] = useState(false);
+  const voiceModeRef = useRef(false);
+
+  // Helper: set both state + ref atomically
+  const activateVoiceMode = useCallback(() => {
+    setIsVoiceMode(true);
+    voiceModeRef.current = true;
   }, []);
 
-  // Scroll to bottom when messages update
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  const deactivateVoiceMode = useCallback(() => {
+    setIsVoiceMode(false);
+    voiceModeRef.current = false;
+  }, []);
 
-  const handleSend = useCallback(async () => {
-    const text = inputValue.trim();
+  // ── Refs (stable, no leaks) ──
+  const messagesEndRef   = useRef(null);
+  const inputRef         = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef   = useRef([]);
+  const streamRef        = useRef(null); // keep mic stream for cleanup
+
+
+
+  // ══════════════════════════════════════════
+  // SEND FLOW — handles both text & voice paths
+  // overrideText is only set by the voice path;
+  // manual sends never pass it.
+  // ══════════════════════════════════════════
+  const handleSend = useCallback(async (overrideText, fromVoice = false) => {
+    const text = (overrideText ?? inputValue).trim();
     if (!text || loading) return;
 
-    // 1. Optimistic UI — add user message instantly
+    // ── Route: manual text → ensure voice mode is OFF ──
+    // ── Route: voice call  → caller has already activated voice mode ──
+    if (!fromVoice) {
+      deactivateVoiceMode();
+    }
+
     const userMsg = {
       id: `user-${Date.now()}`,
       role: 'user',
@@ -53,22 +144,28 @@ export default function ChatInterface() {
     setLoading(true);
 
     try {
-      // 2. Call backend
       const data = await sendMessageToAarya(text);
-
-      // 3. Add AARYA response with slight delay for natural feel
       await new Promise((r) => setTimeout(r, 400));
 
+      // ── Phase 5: Use detailedText for screen rendering ──
       const aiMsg = {
         id: `ai-${Date.now()}`,
         role: 'ai',
-        text: data.aarya,
+        text: data.detailedText,   // rich markdown — displayed in chat
         timestamp: Date.now(),
         mood: data.mood,
       };
       setMessages((prev) => [...prev, aiMsg]);
+
+      // ── Input Mode Router ──
+      // Speak ONLY if this response originated from a voice interaction.
+      // Phase 5+6: Use voiceSummary (clean spoken text) — never detailedText.
+      if (voiceModeRef.current) {
+        speakText(data.voiceSummary);  // short, clean, spoken Hinglish
+        deactivateVoiceMode();          // reset after speaking
+      }
+
     } catch (err) {
-      // Error response
       const errorMsg = {
         id: `err-${Date.now()}`,
         role: 'ai',
@@ -78,12 +175,12 @@ export default function ChatInterface() {
         isError: true,
       };
       setMessages((prev) => [...prev, errorMsg]);
+      deactivateVoiceMode(); // always reset on error
     } finally {
       setLoading(false);
-      // Re-focus input
       setTimeout(() => inputRef.current?.focus(), 100);
     }
-  }, [inputValue, loading]);
+  }, [inputValue, loading, deactivateVoiceMode]);
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -92,20 +189,323 @@ export default function ChatInterface() {
     }
   };
 
-  // Mood indicator color
+  // ══════════════════════════════════════════
+  // VOICE RECORDING FLOW
+  // ══════════════════════════════════════════
+  const startRecording = useCallback(async () => {
+    if (isRecording || mediaRecorderRef.current) return;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      streamRef.current = stream;
+
+      // Determine best supported MIME type
+      const mimeType =
+        MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' :
+        MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' :
+        MediaRecorder.isTypeSupported('audio/ogg') ? 'audio/ogg' :
+        '';
+
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        const chunks = audioChunksRef.current;
+        audioChunksRef.current = [];
+
+        if (chunks.length === 0) return;
+
+        const blob = new Blob(chunks, { type: mimeType || 'audio/webm' });
+        const filename = `recording.${mimeType?.includes('ogg') ? 'ogg' : 'webm'}`;
+
+        // Stop & release mic stream
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach(t => t.stop());
+          streamRef.current = null;
+        }
+        mediaRecorderRef.current = null;
+
+        // Transcribe
+        setIsTranscribing(true);
+        try {
+          const transcribedText = await transcribeAudio(blob, filename);
+          if (transcribedText?.trim()) {
+            // ── Voice mode must be active before handleSend is called ──
+            // activateVoiceMode() was already called when recording started
+            // (or by the wake word callback), so voiceModeRef.current = true here.
+            setInputValue(transcribedText);
+            setTimeout(() => {
+              handleSend(transcribedText, /* fromVoice */ true);
+            }, 50);
+          } else {
+            // Empty transcription — reset voice mode cleanly
+            deactivateVoiceMode();
+          }
+        } catch (err) {
+          console.error('[ChatInterface] Transcription error:', err.message);
+          const errMsg = {
+            id: `err-${Date.now()}`,
+            role: 'ai',
+            text: 'Mic sun nahi paya... dobara try kar! 🎙️',
+            timestamp: Date.now(),
+            mood: 'error',
+            isError: true,
+          };
+          setMessages(prev => [...prev, errMsg]);
+        } finally {
+          setIsTranscribing(false);
+        }
+      };
+
+      recorder.start(250); // collect data in 250ms chunks
+      setIsRecording(true);
+
+      // ── Activate voice mode when mic physically starts ──
+      // (Also activated by wake word callback, this is a no-op in that path)
+      activateVoiceMode();
+      console.log('[ChatInterface] Recording started — voice mode ON');
+
+    } catch (err) {
+      console.error('[ChatInterface] Mic access error:', err.message);
+      setIsRecording(false);
+      if (err.name === 'NotAllowedError') {
+        const errMsg = {
+          id: `err-${Date.now()}`,
+          role: 'ai',
+          text: 'Mic permission nahi mili bhai! Browser settings mein allow kar. 🔒',
+          timestamp: Date.now(),
+          mood: 'error',
+          isError: true,
+        };
+        setMessages(prev => [...prev, errMsg]);
+      }
+    }
+  }, [isRecording, handleSend]);
+
+  const stopRecording = useCallback((silent = false) => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+    }
+    setIsRecording(false);
+    if (!silent) console.log('[ChatInterface] Recording stopped');
+  }, []);
+
+  const handleMicClick = useCallback(() => {
+    if (isRecording) {
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  }, [isRecording, startRecording, stopRecording]);
+
+  // ── Voice Toggle ──
+  const handleVoiceToggle = useCallback(() => {
+    const newState = !voiceOn;
+    setVoiceOn(newState);
+    setVoiceEnabled(newState);
+  }, [voiceOn]);
+
+  // ── Mood indicator color ──
   const getMoodColor = (mood) => {
     switch (mood) {
       case 'stressed': return 'rgba(255, 180, 100, 0.6)';
-      case 'angry': return 'rgba(255, 100, 100, 0.6)';
-      case 'happy': return 'rgba(100, 255, 150, 0.6)';
-      case 'sad': return 'rgba(120, 140, 255, 0.6)';
-      case 'error': return 'rgba(255, 80, 80, 0.6)';
-      default: return 'rgba(255, 255, 255, 0.3)';
+      case 'angry':    return 'rgba(255, 100, 100, 0.6)';
+      case 'happy':    return 'rgba(100, 255, 150, 0.6)';
+      case 'sad':      return 'rgba(120, 140, 255, 0.6)';
+      case 'error':    return 'rgba(255, 80, 80, 0.6)';
+      default:         return 'rgba(255, 255, 255, 0.3)';
     }
   };
 
+  // ── Determine mic button state class ──
+  const micBtnClass = [
+    styles.micBtn,
+    isRecording   ? styles.micBtnActive   : '',
+    wakeGlow      ? styles.micBtnWakeGlow : '',
+    isTranscribing ? styles.micBtnTranscribing : '',
+  ].filter(Boolean).join(' ');
+
+  // ── Auto-focus on mount ──
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (inputRef.current) inputRef.current.focus();
+    }, 800);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // ── Scroll to bottom on new messages ──
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  // ── Request Notification Permissions on Mount ──
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  // ── Wake Word: DISABLED in Electron ──
+  // Browser-based SpeechRecognition does not work inside Electron (constant 'network' errors)
+  // and causes mic contention with the Python desktop_listener.py which is the production
+  // wake word detection path. The Electron/backend IPC pipeline handles wake activation.
+  // If running in a standalone browser (not Electron), re-enable this block.
+  useEffect(() => {
+    // Detect if running inside Electron
+    const isElectron = typeof window !== 'undefined' && window.electron;
+    if (isElectron) {
+      console.log('[ChatInterface] Running inside Electron — browser wake word DISABLED (Python listener handles wake).');
+      return;
+    }
+
+    // Browser-only fallback: use SpeechRecognition if available
+    if (!isWakeWordSupported()) return;
+
+    const isAppActive = isRecording || isTranscribing || loading || isVoiceMode;
+
+    if (isAppActive) {
+      console.log('[ChatInterface] App is active. Suspending passive wake-word detection.');
+      stopWakeWord();
+    } else {
+      console.log('[ChatInterface] App is idle. Initializing/Resuming passive wake-word detection...');
+      
+      startWakeWord((phrase) => {
+        console.log(`[ChatInterface] Wake word detected: "${phrase}"`);
+        playJarvisBeep();
+        activateVoiceMode();
+        setWakeGlow(true);
+        setTimeout(() => setWakeGlow(false), 3000);
+
+        if (typeof window !== 'undefined' && window.electron && window.electron.wakeWindow) {
+          window.electron.wakeWindow();
+        } else {
+          try { window.focus(); } catch (_) {}
+          triggerWakeNotification();
+        }
+
+        speakText("Yes Ayush, I am listening!");
+        setTimeout(() => { startRecording(); }, 1200);
+      });
+    }
+
+    return () => { stopWakeWord(); };
+  }, [isRecording, isTranscribing, loading, isVoiceMode, activateVoiceMode, startRecording]);
+
+  // ── Cleanup mic stream and recorder on unmount ──
+  useEffect(() => {
+    return () => {
+      stopRecording(/* silent */ true);
+      stopSpeaking();
+      stopWakeWord();
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stopRecording]);
+
+  // ── Desktop Runtime Auto-Connect & Heartbeat ──
+  useEffect(() => {
+    // 1. Initial Heartbeat + Interval (every 5 seconds)
+    sendHeartbeat();
+    const heartbeatInterval = setInterval(() => {
+      sendHeartbeat();
+    }, 5000);
+
+    // 2. URL Parameter Query hook (?wake=true) on mount
+    const timer = setTimeout(() => {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('wake') === 'true') {
+        console.log('[AARYA/Desktop] Auto-wake from desktop launch parameter detected.');
+        activateVoiceMode();
+        setWakeGlow(true);
+        setTimeout(() => setWakeGlow(false), 3000);
+        speakText("Yes Ayush, I am listening!");
+        setTimeout(() => {
+          startRecording();
+        }, 1000);
+
+        // Sanitize the URL immediately
+        const cleanUrl = new URL(window.location.href);
+        cleanUrl.searchParams.delete('wake');
+        window.history.replaceState({}, document.title, cleanUrl.pathname + cleanUrl.search);
+      }
+    }, 1000); // slight delay to ensure browser mic audio context is ready
+
+    return () => {
+      clearInterval(heartbeatInterval);
+      clearTimeout(timer);
+    };
+  }, [activateVoiceMode, startRecording]);
+
   return (
     <div className={styles.chatWrapper}>
+
+      {/* ── Cinematic Ambient Waking Overlay ── */}
+      <AnimatePresence>
+        {wakeGlow && (
+          <motion.div
+            className={styles.wakeOverlay}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.5 }}
+          >
+            <div className={styles.glowingHalo} />
+            <motion.div
+              className={styles.wakeOrb}
+              initial={{ scale: 0.3, opacity: 0 }}
+              animate={{ scale: [1, 1.1, 1], opacity: 1 }}
+              transition={{ repeat: Infinity, duration: 1.5, ease: "easeInOut" }}
+            >
+              <div className={styles.wakeOrbCore} />
+              <div className={styles.wakeOrbRing} />
+            </motion.div>
+            <motion.h2
+              className={styles.wakeTitle}
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 }}
+            >
+              AARYA ACTIVATED
+            </motion.h2>
+            <p className={styles.wakeSub}>Haa bhai Ayush, bol... I am listening! 🎙️</p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Listening Orb (shows while recording) ── */}
+      <AnimatePresence>
+        {(isRecording || isTranscribing) && (
+          <motion.div
+            className={styles.voiceOrbContainer}
+            initial={{ opacity: 0, scale: 0.6 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.6 }}
+            transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+          >
+            <div className={isTranscribing ? styles.voiceOrbTranscribing : styles.voiceOrb}>
+              <div className={styles.voiceOrbCore} />
+              <div className={styles.voiceOrbRing1} />
+              <div className={styles.voiceOrbRing2} />
+            </div>
+            <span className={styles.voiceOrbLabel}>
+              {isTranscribing ? 'processing…' : 'listening…'}
+            </span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* ── Chat Header ── */}
       <div className={styles.chatHeader}>
         <div className={styles.headerLeft}>
@@ -113,17 +513,42 @@ export default function ChatInterface() {
           <span className={styles.headerTitle}>AARYA</span>
           <span className={styles.headerSubtitle}>• your safe space</span>
         </div>
-        <button
-          className={styles.historyBtn}
-          onClick={() => setShowHistory(true)}
-          aria-label="View history"
-          id="history-toggle-btn"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <circle cx="12" cy="12" r="10" />
-            <polyline points="12 6 12 12 16 14" />
-          </svg>
-        </button>
+        <div className={styles.headerRight}>
+          {/* Voice Toggle */}
+          <button
+            className={`${styles.headerBtn} ${voiceOn ? styles.headerBtnVoiceOn : ''}`}
+            onClick={handleVoiceToggle}
+            aria-label={voiceOn ? 'Disable voice' : 'Enable voice'}
+            id="voice-toggle-btn"
+            title={voiceOn ? 'Voice ON — click to mute' : 'Voice OFF — click to unmute'}
+          >
+            {voiceOn ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+                <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                <line x1="23" y1="9" x2="17" y2="15"/>
+                <line x1="17" y1="9" x2="23" y2="15"/>
+              </svg>
+            )}
+          </button>
+          {/* History */}
+          <button
+            className={styles.historyBtn}
+            onClick={() => setShowHistory(true)}
+            aria-label="View history"
+            id="history-toggle-btn"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <circle cx="12" cy="12" r="10" />
+              <polyline points="12 6 12 12 16 14" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       {/* ── Messages Area ── */}
@@ -168,7 +593,7 @@ export default function ChatInterface() {
 
         {/* ── Typing Indicator ── */}
         <AnimatePresence>
-          {loading && (
+          {(loading || isTranscribing) && (
             <motion.div
               className={`${styles.messageRow} ${styles.messageRowAi}`}
               initial={{ opacity: 0, y: 10 }}
@@ -192,23 +617,53 @@ export default function ChatInterface() {
 
       {/* ── Glassmorphism Input Bar ── */}
       <div className={styles.inputArea}>
-        <div className={styles.inputPill}>
+        <div className={`${styles.inputPill} ${isRecording ? styles.inputPillRecording : ''}`}>
           <input
             ref={inputRef}
             type="text"
             className={styles.chatInput}
-            placeholder="Bol, kya chal raha hai…"
+            placeholder={isRecording ? 'Listening…' : 'Bol, kya chal raha hai…'}
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={loading}
+            disabled={loading || isRecording || isTranscribing}
             id="chat-input-field"
             autoComplete="off"
           />
+
+          {/* ── Mic Button ── */}
+          <button
+            className={micBtnClass}
+            onClick={handleMicClick}
+            disabled={isTranscribing}
+            aria-label={isRecording ? 'Stop recording' : 'Start voice input'}
+            id="voice-mic-btn"
+            title={isRecording ? 'Tap to stop' : 'Tap to speak'}
+          >
+            {isRecording ? (
+              /* Stop icon when recording */
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="4" y="4" width="16" height="16" rx="2" />
+              </svg>
+            ) : (
+              /* Mic icon when idle */
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                <line x1="12" y1="19" x2="12" y2="23"/>
+                <line x1="8" y1="23" x2="16" y2="23"/>
+              </svg>
+            )}
+
+            {/* Pulse ring shown while recording */}
+            {isRecording && <span className={styles.micPulseRing} />}
+          </button>
+
+          {/* ── Send Button ── */}
           <button
             className={`${styles.sendBtn} ${inputValue.trim() && !loading ? styles.sendBtnActive : ''}`}
-            onClick={handleSend}
-            disabled={!inputValue.trim() || loading}
+            onClick={() => handleSend()}
+            disabled={!inputValue.trim() || loading || isRecording}
             aria-label="Send message"
             id="chat-send-btn"
           >
@@ -218,7 +673,13 @@ export default function ChatInterface() {
             </svg>
           </button>
         </div>
-        <span className={styles.inputHint}>enter to send</span>
+        <span className={styles.inputHint}>
+          {isRecording
+            ? 'tap mic to stop'
+            : isTranscribing
+            ? 'transcribing…'
+            : 'enter to send · mic to speak'}
+        </span>
       </div>
 
       {/* ── History Panel ── */}

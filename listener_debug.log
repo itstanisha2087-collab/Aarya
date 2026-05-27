@@ -1,0 +1,126 @@
+[09:00:55] [AARYA/Listener] Initial energy_threshold = 50
+[09:00:55] [AARYA/Listener] dynamic_energy_threshold = True
+[09:00:55] [AARYA/Listener] Calibrating passive listening microphone stream...
+[09:00:57] [AARYA/Listener] Ambient calibration done. Adjusted threshold = 1
+[09:00:57] [AARYA/Listener] ✓ Continuous listening active. Say 'Hello Aarya' or 'Wake up Aarya'...
+[09:01:07] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:01:08] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:01:11] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:01:14] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:01:19] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:01:22] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:01:28] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:01:34] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:06:54] [AARYA/Listener] Static energy_threshold = 30
+[09:06:54] [AARYA/Listener] dynamic_energy_threshold = False
+[09:06:54] [AARYA/Listener] ✓ Continuous listening active with static threshold. Say 'Hello Aarya' or 'Wake up Aarya'...
+[09:07:05] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:07:11] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:07:25] [AARYA/Listener] Static energy_threshold = 50
+[09:07:25] [AARYA/Listener] dynamic_energy_threshold = False
+[09:07:25] [AARYA/Listener] ✓ Continuous listening active with static threshold. Say 'Hello Aarya' or 'Wake up Aarya'...
+[09:07:39] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:07:45] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:07:50] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:07:56] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:08:02] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:08:04] [AARYA/Listener] Heard: "hello arya"
+[09:08:04] [AARYA/Listener] ★ WAKE MATCH (FUZZY: 'hello arya') ★
+[09:08:04] [AARYA/Listener] ★★★ WAKE PHRASE DETECTED! Playing chimes and waking UI... ★★★
+[09:08:05] [AARYA/Listener] Electron direct wake SUCCESS: {'status': 'ok', 'message': 'Woken'}
+[09:08:11] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:08:26] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:08:30] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:08:34] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:08:36] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:08:41] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:08:43] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:08:47] [AARYA/Listener] Heard: "hello arya"
+[09:08:47] [AARYA/Listener] ★ WAKE MATCH (FUZZY: 'hello arya') ★
+[09:08:47] [AARYA/Listener] ★★★ WAKE PHRASE DETECTED! Playing chimes and waking UI... ★★★
+[09:08:48] [AARYA/Listener] Electron direct wake SUCCESS: {'status': 'ok', 'message': 'Woken'}
+[09:08:50] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:08:57] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:09:00] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:09:03] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:09:05] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:09:07] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:09:10] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:09:16] [AARYA/Listener] Heard: "nahin"
+[09:09:16] [AARYA/Listener] (no wake match)
+[09:09:19] [AARYA/Listener] Heard: "laptop"
+[09:09:19] [AARYA/Listener] (no wake match)
+[09:09:21] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:09:27] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:09:32] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:09:39] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:09:58] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:10:01] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:10:04] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:10:08] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:10:13] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:10:16] [AARYA/Listener] Heard: "hello arya"
+[09:10:16] [AARYA/Listener] ★ WAKE MATCH (FUZZY: 'hello arya') ★
+[09:10:16] [AARYA/Listener] ★★★ WAKE PHRASE DETECTED! Playing chimes and waking UI... ★★★
+[09:10:16] [AARYA/Listener] Electron direct wake SUCCESS: {'status': 'ok', 'message': 'Woken'}
+[09:10:38] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:10:40] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:10:46] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:10:49] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:10:59] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:11:01] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:11:07] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:11:13] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:11:20] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:11:26] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:11:31] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:11:37] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:11:43] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:11:49] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:11:57] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:12:02] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:12:07] [AARYA/Listener] Heard: "wake up arya"
+[09:12:07] [AARYA/Listener] ★ WAKE MATCH (FUZZY: 'wake up arya') ★
+[09:12:07] [AARYA/Listener] ★★★ WAKE PHRASE DETECTED! Playing chimes and waking UI... ★★★
+[09:12:07] [AARYA/Listener] Electron direct wake SUCCESS: {'status': 'ok', 'message': 'Woken'}
+[09:12:10] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:12:23] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:12:26] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:12:32] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:12:42] [AARYA/Listener] Heard: "are lekin aise vah ek sidhi chadhana mein khushi ho gai cal se laga"
+[09:12:42] [AARYA/Listener] (no wake match)
+[09:12:58] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:13:04] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:13:10] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:13:17] [AARYA/Listener] Heard: "kya"
+[09:13:17] [AARYA/Listener] (no wake match)
+[09:13:19] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:13:23] [AARYA/Listener] Heard: "nahin nahin abhi khud se to karo"
+[09:13:23] [AARYA/Listener] (no wake match)
+[09:13:38] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:13:41] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:13:50] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:13:53] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:14:00] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:14:05] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:14:11] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:14:17] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:14:22] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:14:29] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:14:34] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:14:40] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:14:48] [AARYA/Listener] Heard: "sathi mera kam ho gaya"
+[09:14:48] [AARYA/Listener] (no wake match)
+[09:14:56] [AARYA/Listener] Heard: "are message ko bol raha tha yah kam nahin kar raha tha main bol raha hai kam karne"
+[09:14:56] [AARYA/Listener] (no wake match)
+[09:15:01] [AARYA/Listener] Heard: "hello arya"
+[09:15:01] [AARYA/Listener] ★ WAKE MATCH (FUZZY: 'hello arya') ★
+[09:15:01] [AARYA/Listener] ★★★ WAKE PHRASE DETECTED! Playing chimes and waking UI... ★★★
+[09:15:02] [AARYA/Listener] Electron direct wake SUCCESS: {'status': 'ok', 'message': 'Woken'}
+[09:15:09] [AARYA/Listener] Heard: "kaise khul jata hai abhi apne aap khul jata hai pahle se bolane per nahin khul"
+[09:15:09] [AARYA/Listener] (no wake match)
+[09:15:14] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:15:16] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:15:23] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:15:34] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)
+[09:15:44] [AARYA/Listener] [?] Audio detected, recognition failed (UnknownValueError)

@@ -4,3 +4,5 @@ requests
 pydantic
 python-dotenv
 tavily-python
+supabase
+python-multipart

@@ -1,9 +1,9 @@
 const AARYA_API_BASE = "http://127.0.0.1:8000";
 
 /**
- * Send a message to AARYA and get a personality-driven response.
+ * Send a message to AARYA and get a dual-response (detailed text + voice summary).
  * @param {string} message - The user's message text
- * @returns {Promise<{aarya: string, mood: string}>} The response and detected mood
+ * @returns {Promise<{detailedText: string, voiceSummary: string, mood: string}>}
  */
 export async function sendMessageToAarya(message) {
   try {
@@ -19,14 +19,55 @@ export async function sendMessageToAarya(message) {
 
     const data = await res.json();
 
-    // Backend now returns { response } from Ollama — map to frontend shape
+    // ── Phase 5+6: Extract dual-response with full fallback protection ──
+    const reply = data?.reply;
+
+    const detailedText =
+      reply?.detailed_text ||
+      data?.aarya ||           // legacy fallback
+      "Response unavailable.";
+
+    const voiceSummary =
+      reply?.voice_summary ||
+      "Ayush, response screen par available hai.";
+
     return {
-      aarya: data.response || data.aarya || "...",
-      mood: data.mood || "ai",
+      detailedText: String(detailedText).trim(),
+      voiceSummary: String(voiceSummary).trim(),
+      mood: data?.mood || "neutral",
     };
   } catch (error) {
     console.error("[AARYA API Error]:", error.message);
     throw new Error("AARYA is unreachable. Backend may be offline.");
+  }
+}
+
+/**
+ * Send a recorded audio Blob to AARYA's Groq Whisper transcription endpoint.
+ * @param {Blob} audioBlob - The recorded audio blob (webm, wav, mp3, m4a)
+ * @param {string} [filename='recording.webm'] - Filename hint for the server
+ * @returns {Promise<string>} The transcribed text
+ */
+export async function transcribeAudio(audioBlob, filename = 'recording.webm') {
+  try {
+    const formData = new FormData();
+    formData.append('audio', audioBlob, filename);
+
+    const res = await fetch(`${AARYA_API_BASE}/transcribe`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || `Transcription failed with status ${res.status}`);
+    }
+
+    const data = await res.json();
+    return data.text || '';
+  } catch (error) {
+    console.error('[AARYA Transcribe Error]:', error.message);
+    throw new Error('Transcription failed. Check mic permissions and backend.');
   }
 }
 
@@ -56,3 +97,28 @@ export async function fetchChatHistory(limit = 20) {
     return [];
   }
 }
+
+/**
+ * Send a simple heartbeat POST to register active frontend presence.
+ */
+export async function sendHeartbeat() {
+  try {
+    await fetch(`${AARYA_API_BASE}/heartbeat`, { method: 'POST' });
+  } catch (_) {}
+}
+
+/**
+ * Fetch consumer status of wake triggers from backend.
+ * @returns {Promise<boolean>} True if a remote wake trigger occurred.
+ */
+export async function checkWakeStatus() {
+  try {
+    const res = await fetch(`${AARYA_API_BASE}/wake-status`);
+    if (res.ok) {
+      const data = await res.json();
+      return !!data.triggered;
+    }
+  } catch (_) {}
+  return false;
+}
+

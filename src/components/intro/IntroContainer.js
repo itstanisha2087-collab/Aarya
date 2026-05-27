@@ -11,6 +11,15 @@ export default function IntroContainer({ onComplete }) {
   const [phase, setPhase] = useState('entering'); 
   // 'entering' -> 'dissolve' -> 'pull' -> 'sphere' -> 'compress' -> 'fadeout'
 
+  // Bulletproof fallback timer: force transition to chat if animation hangs
+  useEffect(() => {
+    const fallback = setTimeout(() => {
+      console.log("[AARYA/Intro] Standard intro animation timeout reached. Transitioning to Chat Dashboard...");
+      if (onComplete) onComplete();
+    }, 5000);
+    return () => clearTimeout(fallback);
+  }, [onComplete]);
+
   useEffect(() => {
     let timer1, timer2, timer3, timer4;
 

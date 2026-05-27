@@ -147,3 +147,82 @@ tr:nth-child(even) {
   background-color: transparent;
   padding: 0;
 }
+
+/* ── Markdown Headings ── */
+.message-text h1 {
+  font-size: 1.3rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.95);
+  margin: 16px 0 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 6px;
+}
+
+.message-text h2 {
+  font-size: 1.1rem;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  color: rgba(255, 255, 255, 0.9);
+  margin: 14px 0 6px;
+}
+
+.message-text h3 {
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.85);
+  margin: 12px 0 4px;
+}
+
+.message-text h4,
+.message-text h5,
+.message-text h6 {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.75);
+  margin: 10px 0 4px;
+}
+
+/* ── Emphasis ── */
+.message-text strong {
+  color: rgba(255, 255, 255, 0.95);
+  font-weight: 500;
+}
+
+.message-text em {
+  color: rgba(255, 255, 255, 0.8);
+  font-style: italic;
+}
+
+/* ── Blockquotes ── */
+.message-text blockquote {
+  border-left: 3px solid rgba(16, 185, 129, 0.4);
+  margin: 10px 0;
+  padding: 8px 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 0 6px 6px 0;
+  color: rgba(255, 255, 255, 0.7);
+  font-style: italic;
+}
+
+/* ── Links ── */
+.message-text a {
+  color: rgba(16, 185, 129, 0.85);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(16, 185, 129, 0.3);
+  transition: all 0.2s ease;
+}
+
+.message-text a:hover {
+  color: rgba(16, 185, 129, 1);
+  border-bottom-color: rgba(16, 185, 129, 0.6);
+}
+
+/* ── List refinements ── */
+.message-text li {
+  margin-bottom: 4px;
+}
+
+.message-text li::marker {
+  color: rgba(255, 255, 255, 0.3);
+}
