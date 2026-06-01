@@ -1321,7 +1321,6 @@ async def vision_query(req: dict):
             import glob
             from PIL import ImageGrab
             
-            # Dynamic UUID-based temporary path to completely avoid cached static overlays
             temp_filename = f"scan_{uuid.uuid4().hex}.png"
             scan_path = os.path.join(r"D:\Aarya", temp_filename)
             
@@ -1337,11 +1336,8 @@ async def vision_query(req: dict):
             
             # Capture dynamic screenshot
             fresh_screenshot = ImageGrab.grab()
-            
-            # Save the live frame as PNG
             fresh_screenshot.save(scan_path, "PNG")
             
-            # STRICT EXPLICIT VALIDATION: Ensure creation/modification timestamp is within last 500ms
             if not os.path.exists(scan_path):
                 raise HTTPException(status_code=500, detail="Dynamic screenshot creation failed.")
                 
@@ -1349,24 +1345,16 @@ async def vision_query(req: dict):
             age_ms = (time.time() - file_mtime) * 1000
             print(f"[VISION] Dynamic screenshot saved to {scan_path} | Age: {age_ms:.2f}ms")
             
-            if age_ms > 500.0:
-                raise HTTPException(
-                    status_code=500, 
-                    detail=f"Vision cache deadlock detected! Screenshot file age is {age_ms:.2f}ms (threshold 500ms limit)."
-                )
-                
-            # Dynamic image byte read
             with open(scan_path, "rb") as f:
                 img_bytes = f.read()
                 
             import base64
             encoded_image = base64.b64encode(img_bytes).decode("utf-8")
-            
             print("[VISION] Fresh screenshot verified and encoded successfully.")
-        except HTTPException as he:
-            raise he
         except Exception as e:
-            print(f"[AARYA/Vision] Dynamic screenshot capture failed: {e}")
+            print(f"[ANTIGRAVITY VISION CRASH LOG]: Screenshot capture failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Screenshot capture failed: {e}")
             
         print("[VISION] Sending fresh frame to multimodal model")
@@ -1376,7 +1364,6 @@ async def vision_query(req: dict):
         if gemini_key:
             print("[AARYA/Vision] Executing Vision with native Google GenAI SDK (Gemini)...")
             try:
-                global client
                 from google import genai
                 from google.genai import types
                 from pydantic import BaseModel, Field
@@ -1386,11 +1373,11 @@ async def vision_query(req: dict):
                     screen: str = Field(description="Full Markdown documentation response. Use ## headings, ### subheadings, and - bullet points. Minimum 2 subheadings. Minimum 3 bullets per section. Exhaustive and structured.")
                     audio: str = Field(description="Exactly 3-4 sentence spoken summary. No markdown. Plain prose only. Sentence 1: direct answer. Sentence 2: key context. Sentence 3: implication or next step. Sentence 4 optional: follow-up invitation. High-energy, confident, peer-level tone.")
     
-                client = genai.Client(api_key=gemini_key)
+                client_local = genai.Client(api_key=gemini_key)
                 
                 image_part = types.Part.from_bytes(
                     data=base64.b64decode(encoded_image),
-                    mime_type="image/jpeg"
+                    mime_type="image/png"
                 )
                 
                 contents = [
@@ -1403,14 +1390,15 @@ async def vision_query(req: dict):
                     )
                 ]
                 
-                response = client.models.generate_content(
+                response = client_local.models.generate_content(
                     model='gemini-2.5-flash',
                     contents=contents,
                     config=types.GenerateContentConfig(
                         system_instruction=VISION_SYSTEM_PROMPT,
                         temperature=0.4,
                         response_mime_type="application/json",
-                        response_schema=AaryaResponse
+                        response_schema=AaryaResponse,
+                        response_modalities=["TEXT"]
                     )
                 )
     
@@ -1419,14 +1407,14 @@ async def vision_query(req: dict):
                 voice_summary = parsed.get("audio") or parsed.get("voice_summary") or ""
                 
             except Exception as e:
-                print(f"[ANTIGRAVITY BACKEND CRASH LOG]: {str(e)}")
+                print(f"[ANTIGRAVITY VISION CRASH LOG]: Native Gemini Vision failed: {str(e)}")
                 import traceback
                 traceback.print_exc()
                 print(f"[AARYA/Vision] Native Gemini Vision failed: {e}. Falling back to Groq...")
                 
-        # 3. Fallback to Groq Vision (meta-llama/llama-4-scout-17b-16e-instruct)
+        # 3. Fallback to Groq Vision (llama-3.2-11b-vision-preview)
         if not detailed_text:
-            print("[AARYA/Vision] Executing Vision with Groq Llama-4-Scout...")
+            print("[AARYA/Vision] Executing Vision with Groq Llama-3.2-Vision...")
             if not GROQ_API_KEY:
                 raise HTTPException(status_code=500, detail="GROQ_API_KEY not configured on server.")
                 
@@ -1452,7 +1440,7 @@ async def vision_query(req: dict):
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                    "url": f"data:image/jpeg;base64,{encoded_image}"
+                                    "url": f"data:image/png;base64,{encoded_image}"
                                 }
                             }
                         ]
@@ -1462,25 +1450,32 @@ async def vision_query(req: dict):
             }
             
             try:
-                resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=TIMEOUT)
+                def run_post():
+                    return requests.post(GROQ_URL, headers=headers, json=payload, timeout=TIMEOUT)
+                
+                resp = await asyncio.to_thread(run_post)
                 if resp.status_code != 200:
                     print(f"[AARYA/Vision] Groq Vision API error: {resp.text}")
                     raise HTTPException(status_code=502, detail=f"Groq Vision API returned {resp.status_code}")
                     
                 raw_content = resp.json()["choices"][0]["message"]["content"]
                 
-                # Resilient JSON parsing using regex to extract contents between first { and last }
                 cleaned_content = raw_content.strip()
                 match = re.search(r"(\{.*\})", cleaned_content, re.DOTALL)
                 if match:
                     cleaned_content = match.group(1).strip()
-                    
+                
+                # Strip out control characters to prevent JSONDecodeError (e.g. invalid control character)
+                cleaned_content = re.sub(r'[\x00-\x1F\x7F]', ' ', cleaned_content)
+                
                 parsed = json.loads(cleaned_content)
                 detailed_text = parsed.get("screen") or parsed.get("detailed_text") or raw_content
                 voice_summary = parsed.get("audio") or parsed.get("voice_summary") or ""
-            except Exception as e:
-                print(f"[AARYA/Vision] Groq Vision failed: {e}")
-                raise HTTPException(status_code=500, detail=f"Vision model execution failed: {e}")
+            except Exception as ge:
+                print(f"[ANTIGRAVITY VISION CRASH LOG]: Groq Vision fallback failed: {str(ge)}")
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(status_code=500, detail=f"Vision model execution failed: {ge}")
     finally:
         # Guarantee cleanup of dynamic screenshot and delete image variables
         if 'fresh_screenshot' in locals() and fresh_screenshot:
