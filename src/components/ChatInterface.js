@@ -4,8 +4,8 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { sendMessageToAarya, transcribeAudio, sendHeartbeat, checkWakeStatus, scanMyScreen } from '@/lib/api';
-import { speakText, stopSpeaking, setVoiceEnabled, isVoiceEnabled, onPlaybackStateChange } from '@/lib/voice';
+import { sendMessageToAarya, sendMessageToAaryaStreaming, transcribeAudio, sendHeartbeat, checkWakeStatus, scanMyScreen } from '@/lib/api';
+import { speakText, stopSpeaking, setVoiceEnabled, isVoiceEnabled, onPlaybackStateChange, startAudioStream, receiveAudioStreamChunk, endAudioStream } from '@/lib/voice';
 import { startWakeWord, stopWakeWord, isWakeWordSupported } from '@/lib/wakeWord';
 import HistoryPanel from './HistoryPanel';
 import styles from './ChatInterface.module.css';
@@ -201,48 +201,73 @@ export default function ChatInterface() {
       text,
       timestamp: Date.now(),
     };
-    setMessages((prev) => [...prev, userMsg]);
+
+    const aiMessageId = `ai-${Date.now()}`;
+    const aiMsg = {
+      id: aiMessageId,
+      role: 'ai',
+      text: '', // start empty for streaming
+      timestamp: Date.now(),
+      mood: 'neutral',
+    };
+
+    setMessages((prev) => [...prev, userMsg, aiMsg]);
     setInputValue('');
     setLoading(true);
 
     try {
-      const data = await sendMessageToAarya(text, language, voiceType, voiceSpeed);
-      await new Promise((r) => setTimeout(r, 400));
+      const isVoice = voiceModeRef.current;
+      if (isVoice) {
+        startAudioStream();
+      }
 
-      // ── Phase 5: Use detailedText for screen rendering ──
-      const aiMsg = {
-        id: `ai-${Date.now()}`,
-        role: 'ai',
-        text: data.detailedText,   // rich markdown — displayed in chat
-        timestamp: Date.now(),
-        mood: data.mood,
-      };
-      setMessages((prev) => [...prev, aiMsg]);
+      await sendMessageToAaryaStreaming(
+        text,
+        (chunk) => {
+          if (chunk.type === "text") {
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === aiMessageId ? { ...msg, text: msg.text + chunk.data } : msg
+              )
+            );
+          } else if (chunk.type === "audio") {
+            if (isVoice) {
+              receiveAudioStreamChunk(chunk.data);
+            }
+          } else if (chunk.type === "error") {
+            throw new Error(chunk.data);
+          }
+        },
+        language,
+        voiceType,
+        voiceSpeed
+      );
 
-      // ── Input Mode Router ──
-      // Speak ONLY if this response originated from a voice interaction.
-      // Phase 5+6: Use voiceSummary (clean spoken text) — never detailedText.
-      if (voiceModeRef.current) {
-        speakText(data.voiceSummary, data.audioBytes, language, voiceType, voiceSpeed);  // short, clean, spoken Hinglish
-        deactivateVoiceMode();          // reset after speaking
+      if (isVoice) {
+        endAudioStream();
+        deactivateVoiceMode();
       }
 
     } catch (err) {
-      const errorMsg = {
-        id: `err-${Date.now()}`,
-        role: 'ai',
-        text: 'Yaar connection toot gaya… backend check kar ya thodi der baad try kar.',
-        timestamp: Date.now(),
-        mood: 'error',
-        isError: true,
-      };
-      setMessages((prev) => [...prev, errorMsg]);
+      console.error("[ChatInterface handleSend Error]:", err);
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === aiMessageId
+            ? {
+                ...msg,
+                text: 'Yaar connection toot gaya… backend check kar ya thodi der baad try kar.',
+                isError: true,
+                mood: 'error',
+              }
+            : msg
+        )
+      );
       deactivateVoiceMode(); // always reset on error
     } finally {
       setLoading(false);
       setTimeout(() => inputRef.current?.focus(), 100);
     }
-  }, [inputValue, loading, deactivateVoiceMode, language, voiceType]);
+  }, [inputValue, loading, deactivateVoiceMode, language, voiceType, voiceSpeed]);
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {

@@ -1,10 +1,13 @@
+import pyaudio
+import audioop
+import wave
+import io
 import os
 import sys
 import time
 import requests
-import winsound
-import speech_recognition as sr
 import threading
+import winsound
 
 # Set standard streams to UTF-8 to prevent encoding crashes on Windows
 sys.stdout.reconfigure(encoding='utf-8')
@@ -15,9 +18,16 @@ print("      AARYA Ambient Voice Listener Active         ")
 print("==================================================")
 print("Running inside an active desktop session with direct mic access.")
 
-BACKEND_AMBIENT_URL = "http://127.0.0.1:8000/api/ambient-query"
-LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "listener_debug.log")
+# Audio configuration
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 16000
+CHUNK = 256 # 256 samples per chunk = 16ms duration
 
+BACKEND_BASE_URL = "http://127.0.0.1:8000"
+BACKEND_AMBIENT_URL = f"{BACKEND_BASE_URL}/api/ambient-query"
+BACKEND_TRANSCRIBE_URL = f"{BACKEND_BASE_URL}/transcribe"
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "listener_debug.log")
 
 def log(msg):
     """Print and append to debug log file."""
@@ -30,7 +40,6 @@ def log(msg):
     except Exception:
         pass
 
-
 def play_chime():
     """Play a premium rising chime on wake detection."""
     try:
@@ -38,7 +47,6 @@ def play_chime():
         winsound.Beep(1100, 150)
     except Exception as e:
         log(f"[AARYA/Listener] Beep synthesis failed: {e}")
-
 
 def play_confirm_chime():
     """Play a premium high double beep to confirm active query capture."""
@@ -48,22 +56,17 @@ def play_confirm_chime():
     except Exception as e:
         log(f"[AARYA/Listener] Beep synthesis failed: {e}")
 
-
 def trigger_electron_wake():
     """Send an instant, zero-latency wake signal directly to local Electron IPC server."""
     try:
-        # Hits Electron's local Node HTTP server wake endpoint instantly
         requests.post("http://127.0.0.1:3001/wake", json={}, timeout=1.0)
         log("[AARYA/Listener] Sent instant direct Electron wake IPC signal.")
     except Exception as e:
         log(f"[AARYA/Listener] Instant wake signal failed: {e}")
 
-
 def send_ambient_query(query):
     """Send ambient voice query payload silently to FastAPI backend as a single-pass execution."""
-    log(f"[AARYA/Listener] Dispatched Jarvis single-pass query: '{query}'")
-    
-    # Play a quick confirmation chime if it is NOT a stop command
+    log(f"[AARYA/Listener] Dispatched query: '{query}'")
     is_stop = any(trigger in query.lower() for trigger in ["stop", "cancel", "quiet", "silence", "shh"])
     if not is_stop:
         play_confirm_chime()
@@ -77,18 +80,15 @@ def send_ambient_query(query):
         }
         res = requests.post(BACKEND_AMBIENT_URL, json=payload, timeout=20.0)
         if res.status_code == 200:
-            log(f"[AARYA/Listener] Single-pass query SUCCESS: {res.json()}")
-            print("[INFO] Query payload sent successfully.", flush=True)
+            log(f"[AARYA/Listener] Query SUCCESS: {res.json()}")
         else:
             log(f"[AARYA/Listener] Query returned status: {res.status_code}")
     except Exception as e:
         log(f"[AARYA/Listener] Query connection failed: {e}")
 
-
 def send_ambient_query_async(query):
     """Spawn background thread to dispatch query payload and prevent mic queue block."""
     threading.Thread(target=send_ambient_query, args=(query,), daemon=True).start()
-
 
 def parse_ambient_command(text):
     """
@@ -97,14 +97,11 @@ def parse_ambient_command(text):
     Returns (matched: bool, query: str)
     """
     text_clean = text.lower().strip()
-    
-    # Trigger names to look for
     triggers = ["aarya", "arya", "aria", "ariya", "aariya"]
     
     matched_trigger = None
     trigger_index = -1
     
-    # Find the earliest trigger word in the sentence
     for trig in triggers:
         idx = text_clean.find(trig)
         if idx != -1:
@@ -115,160 +112,184 @@ def parse_ambient_command(text):
     if matched_trigger is None:
         return False, ""
 
-    # Extract prefix and suffix surrounding the trigger
     prefix = text_clean[:trigger_index].strip()
     suffix = text_clean[trigger_index + len(matched_trigger):].strip()
     query = f"{prefix} {suffix}".strip()
-    
-    # Strip leading/trailing punctuation
     query = query.strip(",.:;!? ")
     
-    # Split into words to clean up leading greeting fluff
     words = query.split()
     if not words:
-        return True, "hello"  # Default to warm greeting if they only said "Aarya"
+        return True, "hello"
         
     greetings = {"hello", "hey", "hi", "wake", "up", "suno", "please", "yo", "oi"}
     while words and words[0].strip(",.:;!? ") in greetings:
         words.pop(0)
         
     query_clean = " ".join(words).strip(",.:;!? ")
-    
     if not query_clean:
         return True, "hello"
         
     return True, query_clean
 
+def check_playback_state():
+    """Returns True if the backend reports that audio output is currently speaking."""
+    try:
+        res = requests.get(f"{BACKEND_BASE_URL}/api/playback-state", timeout=0.5)
+        if res.status_code == 200:
+            return res.json().get("is_speaking", False)
+    except Exception:
+        pass
+    return False
 
-# ── Audio capture constants (PRD Section 5.2.1) ──────────────────────
-CHUNK_SIZE               = 1024        # Smaller chunks = faster energy sampling
-SAMPLE_RATE              = 16000       # 16kHz — optimal for speech recognition
-PHRASE_TIME_LIMIT        = 15.0        # Maximum phrase capture window
+def pcm_to_wav_bytes(pcm_chunks):
+    """Converts a sequence of Int16 PCM chunks into in-memory WAV file bytes."""
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, "wb") as wf:
+        wf.setnchannels(CHANNELS)
+        wf.setsampwidth(2) # 16-bit
+        wf.setframerate(RATE)
+        wf.writeframes(b"".join(pcm_chunks))
+    return wav_buffer.getvalue()
 
-# ── SpeechRecognition energy threshold tuning ─────────────────────────
-ENERGY_THRESHOLD_FLOOR   = 150    # Never go below this (prevents noise triggers)
-ENERGY_THRESHOLD_DEFAULT = 250    # Initial value before dynamic calibration
-DYNAMIC_ENERGY_RATIO     = 1.3    # Multiplier above ambient for voice detection
-DYNAMIC_ENERGY_ENABLED   = True   # Always on; adapts to room conditions
-
-def build_recognizer() -> sr.Recognizer:
-    recognizer = sr.Recognizer()
-
-    # Sensitivity settings
-    recognizer.energy_threshold         = ENERGY_THRESHOLD_DEFAULT
-    recognizer.dynamic_energy_threshold = DYNAMIC_ENERGY_ENABLED
-    recognizer.dynamic_energy_adjustment_damping  = 0.15
-    recognizer.dynamic_energy_ratio     = DYNAMIC_ENERGY_RATIO
-
-    # Pause and phrase timing
-    recognizer.pause_threshold          = 0.6   # Seconds of silence = phrase end
-    recognizer.phrase_threshold         = 0.3   # Min phrase duration to capture
-    recognizer.non_speaking_duration    = 0.4   # Pre-phrase silence buffer
-
-    return recognizer
-
-def calibrate_microphone(recognizer: sr.Recognizer, duration: float = 2.0):
-    """
-    Samples ambient noise for `duration` seconds on startup.
-    Sets a dynamic baseline so threshold self-adjusts to room conditions.
-    Must be called once before the main listen loop.
-    """
-    with sr.Microphone(sample_rate=SAMPLE_RATE, chunk_size=CHUNK_SIZE) as source:
-        log("[AARYA Listener] Calibrating microphone to ambient noise...")
-        recognizer.adjust_for_ambient_noise(source, duration=duration)
-        # Enforce floor to prevent over-sensitivity in very quiet rooms
-        if recognizer.energy_threshold < ENERGY_THRESHOLD_FLOOR:
-            recognizer.energy_threshold = ENERGY_THRESHOLD_FLOOR
-        log(f"[AARYA Listener] Energy threshold set to: {recognizer.energy_threshold:.1f}")
+def transcribe_audio_bytes(wav_bytes):
+    """Sends WAV bytes to backend /transcribe endpoint to get Whisper transcription."""
+    try:
+        files = {"audio": ("speech.wav", wav_bytes, "audio/wav")}
+        data = {"language": "english"}
+        res = requests.post(BACKEND_TRANSCRIBE_URL, files=files, data=data, timeout=10.0)
+        if res.status_code == 200:
+            return res.json().get("text", "").strip()
+    except Exception as e:
+        log(f"[AARYA/Listener] Transcription failed: {e}")
+    return ""
 
 def listening_loop():
-    log("[AARYA/Listener] Initializing tuned SpeechRecognition engine...")
-    r = build_recognizer()
+    p = pyaudio.PyAudio()
     
-    # 1. Calibrate to room ambient noise floor on startup (PRD Section 5.2.2)
-    calibrate_microphone(r, duration=2.0)
+    try:
+        stream = p.open(
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=RATE,
+            input=True,
+            frames_per_buffer=CHUNK
+        )
+    except Exception as e:
+        log(f"[AARYA/Listener] Failed to open audio device: {e}")
+        return
+
+    log("[AARYA/Listener] Microphone stream opened and PERMANENTLY ON.")
     
-    log("[AARYA/Listener] Starting always-on background listening loop...")
+    # VAD state tracking parameters
+    ambient_energy = 250.0
+    speech_active = False
+    speech_buffer = []
+    silence_chunks = 0
+    pre_speech_buffer = []
+    
+    # Strict VAD limits
+    # 800ms silence threshold: 800ms / 16ms per chunk = 50 chunks
+    SILENCE_LIMIT_CHUNKS = 50
+    # 1.5 seconds maximum pre-speech buffer: 1.5s / 16ms = 93 chunks
+    PRE_SPEECH_LIMIT_CHUNKS = 93
+    
+    log("[AARYA/Listener] Starting continuous PyAudio dynamic VAD loop...")
+    
     while True:
         try:
-            # Initialize microphone once and hold it open permanently
-            with sr.Microphone(sample_rate=SAMPLE_RATE, chunk_size=CHUNK_SIZE) as source:
-                log("[INFO] Microphone stream opened and PERMANENTLY ON at OS level.")
+            # Check playback state to avoid self-feedback
+            if check_playback_state():
+                time.sleep(0.1)
+                pre_speech_buffer.clear()
+                continue
                 
-                while True:
-                    try:
-                        # ── Prevent Mic Self-Feedback (Before Recording) ──
-                        try:
-                            check_res = requests.get("http://127.0.0.1:8000/api/playback-state", timeout=0.8)
-                            if check_res.status_code == 200 and check_res.json().get("is_speaking", False):
-                                time.sleep(0.2)
-                                continue
-                        except Exception:
-                            pass # If backend is offline, continue listening normally
-
-                        audio = r.listen(source, timeout=10, phrase_time_limit=PHRASE_TIME_LIMIT)
-                    except sr.WaitTimeoutError:
-                        continue
+            # Read mic chunk
+            data = stream.read(CHUNK, exception_on_overflow=False)
+            if not data:
+                continue
+                
+            # Compute RMS energy of raw Int16 PCM chunk
+            rms = audioop.rms(data, 2)
+            
+            # Dynamic ambient noise floor adaptation during silence
+            if not speech_active:
+                ambient_energy = (ambient_energy * 0.99) + (rms * 0.01)
+                ambient_energy = max(ambient_energy, 100.0) # floor limit
+                
+            # Check voice activity threshold (adapted based on noise floor)
+            threshold = ambient_energy * 1.5 + 120
+            
+            if rms > threshold:
+                if not speech_active:
+                    log(f"[AARYA/Listener] Voice activity detected! (RMS: {rms:.1f} | Threshold: {threshold:.1f})")
+                    speech_active = True
+                    speech_buffer = list(pre_speech_buffer)
+                    silence_chunks = 0
+                
+                speech_buffer.append(data)
+                silence_chunks = 0
+            else:
+                if speech_active:
+                    speech_buffer.append(data)
+                    silence_chunks += 1
                     
-                    try:
-                        # ── Prevent Mic Self-Feedback (After Recording, before transcribing) ──
-                        try:
-                            check_res = requests.get("http://127.0.0.1:8000/api/playback-state", timeout=0.8)
-                            if check_res.status_code == 200 and check_res.json().get("is_speaking", False):
-                                log("[AARYA/Listener] Speech playback active during capture. Ignoring.")
-                                time.sleep(0.2)
-                                continue
-                        except Exception:
-                            pass
-
-                        text = r.recognize_google(audio).lower().strip()
-                        log(f"[AARYA/Listener] Heard: \"{text}\"")
-
-                        matched, query = parse_ambient_command(text)
-                        if matched:
-                            log(f"[AARYA/Listener] Wake-word matched! Extracting query: '{query}'")
-                            
-                            # Trigger instant foregrounding in background thread
-                            threading.Thread(target=trigger_electron_wake, daemon=True).start()
-                            
-                            # Dispatch query async to backend
-                            send_ambient_query_async(query)
-                            
-                            # Sleep to let backend register is_speaking before listening again
-                            time.sleep(0.5)
-                            continue
-                        else:
-                            log(f"[AARYA/Listener] (no wake trigger found)")
-
-                    except sr.UnknownValueError:
-                        continue
-                    except sr.RequestError as e:
-                        log(f"[AARYA/Listener] Google API error: {e}")
-                        time.sleep(2)
-                        continue
-                    except Exception as e:
-                        log(f"[AARYA/Listener] Exception inside recognizer loop: {e}")
-                        time.sleep(1)
-                        continue
-
+                    # Enforce strict 800ms silence VAD cutoff
+                    if silence_chunks >= SILENCE_LIMIT_CHUNKS:
+                        log(f"[AARYA/Listener] Silence detected for 800ms. Cutting recording...")
+                        speech_active = False
+                        
+                        captured_pcm = list(speech_buffer[:-silence_chunks]) # strip silence padding
+                        speech_buffer.clear()
+                        
+                        if len(captured_pcm) > 10: # skip empty background ticks
+                            threading.Thread(target=process_speech_phrase, args=(captured_pcm,), daemon=True).start()
+                else:
+                    # Maintain pre-speech buffer
+                    pre_speech_buffer.append(data)
+                    if len(pre_speech_buffer) > PRE_SPEECH_LIMIT_CHUNKS:
+                        pre_speech_buffer.pop(0)
+                        
         except Exception as e:
-            log(f"[ERROR] Ambient listener outer context error: {e}")
-            time.sleep(3)
+            log(f"[AARYA/Listener] Error in listen loop: {e}")
+            time.sleep(0.1)
 
+def process_speech_phrase(pcm_chunks):
+    """Processes recorded PCM phrase in background thread to avoid blocking the main audio capture stream."""
+    wav_bytes = pcm_to_wav_bytes(pcm_chunks)
+    text = transcribe_audio_bytes(wav_bytes)
+    if not text:
+        return
+        
+    log(f"[AARYA/Listener] Heard: \"{text}\"")
+    matched, query = parse_ambient_command(text)
+    if matched:
+        log(f"[AARYA/Listener] Wake-word matched! Extracting query: '{query}'")
+        # Trigger instant foregrounding in background thread
+        threading.Thread(target=trigger_electron_wake, daemon=True).start()
+        # Dispatch query async to backend
+        send_ambient_query_async(query)
+    else:
+        # If AARYA is in continuous dialogue mode (ACTIVE), send speech query directly without wake word
+        try:
+            res = requests.get(f"{BACKEND_BASE_URL}/api/v1/state", timeout=0.5)
+            if res.status_code == 200:
+                state_data = res.json()
+                current_state = state_data.get("current_state", 0)
+                if current_state == 2: # ACTIVE state
+                    log(f"[AARYA/Listener] Continuous dialogue active. Dispatching query: '{text}'")
+                    send_ambient_query_async(text)
+        except Exception as e:
+            log(f"[AARYA/Listener] Failed to fetch FSM state: {e}")
 
 def main():
-    # Enforce thread survival: run listener inside a daemon thread
     listener_thread = threading.Thread(target=listening_loop, daemon=True)
     listener_thread.start()
-    
-    # Keep the main process alive
     while True:
         try:
             time.sleep(1)
         except KeyboardInterrupt:
             print("[INFO] Exiting Aarya Ambient Listener...")
             break
-
 
 if __name__ == "__main__":
     main()

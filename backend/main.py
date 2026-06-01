@@ -1,4 +1,5 @@
 import os
+import asyncio
 import traceback
 import gc
 import json
@@ -858,40 +859,248 @@ def wake_ui():
         print(f"[AARYA/Backend] Failed to communicate with Electron: {e}")
         return {"status": "electron_not_running", "error": str(e)}
 
+_state_lock = asyncio.Lock()
+_auto_transition_task = None
+
+async def _auto_transition_to_active_task(delay: float = 4.0):
+    await asyncio.sleep(delay)
+    async with _state_lock:
+        if fsm.current_state == AARYAState.CONFIRM:
+            fsm.on_activation_complete()
+            print("[AARYA/FSM] Auto-transitioned from CONFIRM to ACTIVE via fallback timer.")
+
+async def stream_groq_fallback(user_input: str, history: list):
+    print("[AARYA/Stream] Entering Groq fallback streaming pathway...")
+    if not GROQ_API_KEY:
+        yield json.dumps({"type": "error", "data": "GROQ_API_KEY is not defined."}) + "\n"
+        return
+
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    messages = [
+        {"role": "system", "content": "You are AARYA — a highly intelligent AI companion and peer. Speak directly to Ayush. Respond in clean, natural, flowing conversational English prose. Keep it under 6 sentences. Do NOT use markdown headers, asterisks, list bullet points, backticks, code blocks, or raw URLs. Write exactly how you want your voice output to sound."}
+    ]
+    if history:
+        for msg in history:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": user_input})
+    
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": messages,
+        "temperature": 0.7,
+        "stream": True
+    }
+    
+    try:
+        def run_post():
+            return requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, stream=True, timeout=10.0)
+            
+        resp = await asyncio.to_thread(run_post)
+        
+        if resp.status_code == 429:
+            print("[AARYA/Stream] Llama 3.3 70B rate limited. Retrying with Llama 3.1 8B Instant...")
+            payload["model"] = "llama-3.1-8b-instant"
+            resp = await asyncio.to_thread(run_post)
+            
+        if resp.status_code != 200:
+            yield json.dumps({"type": "error", "data": f"Groq stream error: {resp.text}"}) + "\n"
+            return
+            
+        current_sentence = []
+        
+        for line in resp.iter_lines():
+            if line:
+                decoded_line = line.decode('utf-8').strip()
+                if decoded_line.startswith("data: "):
+                    data_str = decoded_line[6:]
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        parsed = json.loads(data_str)
+                        delta = parsed["choices"][0]["delta"]
+                        content = delta.get("content", "")
+                        if content:
+                            yield json.dumps({"type": "text", "data": content}) + "\n"
+                            
+                            current_sentence.append(content)
+                            sentence_str = "".join(current_sentence)
+                            
+                            if any(sentence_str.endswith(p) for p in [".", "!", "?", "।"]):
+                                clean_sent = strictly_clean_audio_text(sentence_str)
+                                if len(clean_sent) > 5:
+                                    try:
+                                        audio_bytes = await generate_gemini_audio_with_fallback(clean_sent)
+                                        if audio_bytes:
+                                            raw_pcm = audio_bytes[44:] if len(audio_bytes) > 44 else audio_bytes
+                                            base64_audio = base64.b64encode(raw_pcm).decode("utf-8")
+                                            yield json.dumps({"type": "audio", "data": base64_audio}) + "\n"
+                                    except Exception:
+                                        pass
+                                current_sentence.clear()
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f"[AARYA/Stream] Groq streaming failed: {e}")
+        yield json.dumps({"type": "error", "data": str(e)}) + "\n"
+
+async def stream_gemini_response(user_input: str, history: list):
+    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not gemini_key:
+        yield json.dumps({"type": "error", "data": "GEMINI_API_KEY is not defined."}) + "\n"
+        return
+
+    try:
+        from google import genai
+        from google.genai import types
+        
+        client_local = genai.Client(api_key=gemini_key)
+        
+        contents = []
+        if history:
+            for msg in history:
+                role = "user" if msg["role"] == "user" else "model"
+                contents.append(types.Content(
+                    role=role,
+                    parts=[types.Part.from_text(text=msg["content"])]
+                ))
+        
+        contents.append(types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=user_input)]
+        ))
+        
+        stream_prompt = (
+            "You are AARYA — a highly intelligent AI companion and peer. Speak directly to Ayush. "
+            "Respond in clean, natural, flowing conversational English prose. Keep it under 6 sentences. "
+            "Do NOT use markdown headers, asterisks, list bullet points, backticks, code blocks, or raw URLs. "
+            "Write exactly how you want your voice output to sound."
+        )
+        
+        voice_name = AARYA_VOICE_PROFILE or "Aoede"
+        print(f"[AARYA/Stream] Spawning Gemini Content Stream using voice: {voice_name}")
+        
+        response_stream = await client_local.aio.models.generate_content_stream(
+            model='gemini-2.5-flash-preview-tts',
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=stream_prompt,
+                temperature=0.7,
+                response_modalities=["TEXT", "AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                            voice_name=voice_name
+                        )
+                    )
+                ),
+            )
+        )
+        
+        async for chunk in response_stream:
+            if not chunk.candidates:
+                continue
+            content = chunk.candidates[0].content
+            if not content or not content.parts:
+                continue
+                
+            for part in content.parts:
+                if part.text:
+                    yield json.dumps({"type": "text", "data": part.text}) + "\n"
+                if part.inline_data:
+                    base64_audio = base64.b64encode(part.inline_data.data).decode("utf-8")
+                    yield json.dumps({"type": "audio", "data": base64_audio}) + "\n"
+                    
+    except Exception as e:
+        print(f"[AARYA/Stream] Gemini stream failed: {e}. Falling back to Groq stream...")
+        async for frame in stream_groq_fallback(user_input, history):
+            yield frame
+
+async def chat_stream_generator(user_message: str, history: list, user_id: str):
+    accumulated_text = []
+    async for frame in stream_gemini_response(user_message, history):
+        yield frame
+        try:
+            data = json.loads(frame)
+            if data.get("type") == "text":
+                accumulated_text.append(data.get("data", ""))
+        except Exception:
+            pass
+            
+    full_response = "".join(accumulated_text).strip()
+    if full_response and full_response != FALLBACK["aarya"]:
+        save_message(user_id, "assistant", full_response)
+        print(f"[AARYA/Chat] Saved assistant message to Supabase: {full_response[:60]}...")
+
 @app.post("/api/wake")
 async def api_wake():
-    """
-    Triggers FSM STATE 0 -> STATE 1 and returns the hardcoded confirmation audio bytes in base64.
-    """
-    greeting = fsm.on_wake_word_detected()
-    if greeting:
-        audio_bytes = await generate_confirmation_audio()
-        base64_audio = base64.b64encode(audio_bytes).decode("utf-8") if audio_bytes else ""
-        
-        # Advance FSM to operational/ACTIVE state since greeting is being played
-        fsm.on_activation_complete()
-        
-        return {
-            "status": "activated",
-            "greeting": greeting,
-            "audio_bytes": base64_audio
-        }
-    else:
-        return {
-            "status": "ignored",
-            "reason": f"System already active in state: {fsm.current_state.name}"
-        }
+    global _auto_transition_task
+    async with _state_lock:
+        if fsm.current_state == AARYAState.DORMANT:
+            fsm.force_state(AARYAState.CONFIRM, greeting_played=True)
+            
+            wav_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "confirm_yes_sir.wav")
+            if not os.path.exists(wav_path):
+                wav_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fallback_confirm.wav")
+            
+            audio_bytes = b""
+            if os.path.exists(wav_path):
+                try:
+                    with open(wav_path, "rb") as f:
+                        audio_bytes = f.read()
+                except Exception as e:
+                    print(f"[AARYA] Failed to read cached activation WAV: {e}")
+            
+            if not audio_bytes:
+                audio_bytes = await generate_gemini_audio_with_fallback("Yes sir, I am listening.")
+                
+            base64_audio = base64.b64encode(audio_bytes).decode("utf-8") if audio_bytes else ""
+            
+            if _auto_transition_task and not _auto_transition_task.done():
+                _auto_transition_task.cancel()
+                
+            _auto_transition_task = asyncio.create_task(_auto_transition_to_active_task(4.0))
+            
+            return {
+                "status": "activated",
+                "greeting": "Yes sir, I am listening.",
+                "audio_bytes": base64_audio
+            }
+        else:
+            return {
+                "status": "ignored",
+                "reason": f"System already active in state: {fsm.current_state.name}"
+            }
+
+@app.post("/api/confirm_played")
+async def api_confirm_played():
+    global _auto_transition_task
+    async with _state_lock:
+        if fsm.current_state == AARYAState.CONFIRM:
+            fsm.on_activation_complete()
+            if _auto_transition_task and not _auto_transition_task.done():
+                _auto_transition_task.cancel()
+            return {"status": "success", "state": fsm.current_state.name}
+        return {"status": "ignored", "state": fsm.current_state.name}
+
+@app.post("/api/dismiss")
+async def api_dismiss():
+    global _auto_transition_task
+    async with _state_lock:
+        fsm.reset()
+        if _auto_transition_task and not _auto_transition_task.done():
+            _auto_transition_task.cancel()
+        return {"status": "dismissed", "state": fsm.current_state.name}
 
 @app.post("/api/query")
 async def api_query(req: dict):
-    """
-    Query endpoint which expects STATE 2 (ACTIVE) and returns dual-output with native base64 audio.
-    """
     query = req.get("text", "").strip()
     if not query:
-        return {"error": "Empty query"}
+        raise HTTPException(status_code=400, detail="Empty query")
         
-    # Check if FSM is in active state
     if fsm.current_state != AARYAState.ACTIVE:
         raise HTTPException(
             status_code=503,
@@ -900,28 +1109,11 @@ async def api_query(req: dict):
         
     history = get_chat_history("Ayush")
     save_message("Ayush", "user", query)
-    result = aarya_agent(query, history, "english", "fast")
     
-    if result is None:
-        result = {
-            "detailed_text": FALLBACK["aarya"],
-            "voice_summary": "Ayush, thoda network ya API issue lag raha hai. Ek baar phir try karte hain."
-        }
-        
-    detailed_text = result["detailed_text"]
-    voice_summary = result["voice_summary"]
-    
-    # Generate native audio bytes from Gemini
-    audio_bytes = await generate_gemini_audio_with_fallback(voice_summary)
-    base64_audio = base64.b64encode(audio_bytes).decode("utf-8") if audio_bytes else ""
-    
-    save_message("Ayush", "assistant", detailed_text)
-    
-    return {
-        "ui_text": detailed_text,
-        "audio_bytes": base64_audio,
-        "voice_summary": voice_summary
-    }
+    return StreamingResponse(
+        chat_stream_generator(query, history, "Ayush"),
+        media_type="application/x-ndjson"
+    )
 
 @app.post("/api/ambient-query")
 async def ambient_query(req: dict):
@@ -1074,14 +1266,12 @@ async def chat(req: dict):
     DEFAULT_VOICE_SPEED = voice_speed
     
     if not user_message:
-        return {
-            "reply": {
-                "detailed_text": "Please say something... I'm here and listening, but I need your input!",
-                "voice_summary": "Please say something, I am listening and ready for your input.",
-                "audio_bytes": ""
-            },
-            "mood": "neutral"
-        }
+        async def empty_stream():
+            yield json.dumps({
+                "type": "text",
+                "data": "Please say something... I'm here and listening, but I need your input!"
+            }) + "\n"
+        return StreamingResponse(empty_stream(), media_type="application/x-ndjson")
 
     # FSM Operational Guard Check & Auto-Activation for Manual UI Input
     if fsm.current_state != AARYAState.ACTIVE:
@@ -1095,36 +1285,10 @@ async def chat(req: dict):
     print("Saving message to Supabase...")
     save_message(user_id, "user", user_message)
 
-    result = aarya_agent(user_message, history, language, voice_speed)
-
-    # ── Phase 3+4: Handle None (agent failed) ──
-    if result is None:
-        result = {
-            "detailed_text": FALLBACK["aarya"],
-            "voice_summary": "Ayush, thoda network ya API issue lag raha hai. Ek baar phir try karte hain."
-        }
-
-    detailed_text = result["detailed_text"]
-    voice_summary  = result["voice_summary"]
-
-    # Generate native audio bytes from Gemini
-    audio_bytes = await generate_gemini_audio_with_fallback(voice_summary)
-    base64_audio = base64.b64encode(audio_bytes).decode("utf-8") if audio_bytes else ""
-
-    # ── Phase 7: Store ONLY detailed_text in Supabase (not voice_summary or raw JSON) ──
-    if detailed_text != FALLBACK["aarya"]:
-        save_message(user_id, "assistant", detailed_text)
-
-    print(f"[AARYA] detailed_text ({len(detailed_text)} chars) | voice_summary: '{voice_summary[:60]}'")
-
-    return {
-        "reply": {
-            "detailed_text": detailed_text,
-            "voice_summary": voice_summary,
-            "audio_bytes": base64_audio
-        },
-        "mood": "neutral"
-    }
+    return StreamingResponse(
+        chat_stream_generator(user_message, history, user_id),
+        media_type="application/x-ndjson"
+    )
 
 @app.post("/api/vision")
 async def vision_query(req: dict):

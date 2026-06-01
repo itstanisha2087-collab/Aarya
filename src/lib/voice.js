@@ -4,19 +4,28 @@
  * Uses a sentence-by-sentence queue streaming architecture (Gemini Live-style)
  * to deliver ultra-low initial latency (sub-200ms) with seamless pacing.
  * 
+ * Also implements a Web Audio API progressive stream player to decode and play
+ * base64-encoded Int16 PCM chunks dynamically with zero gaps.
+ * 
  * Usage:
- *   import { speakText, stopSpeaking, setVoiceEnabled, onPlaybackStateChange } from '@/lib/voice';
+ *   import { speakText, stopSpeaking, setVoiceEnabled, onPlaybackStateChange, startAudioStream, receiveAudioStreamChunk, endAudioStream } from '@/lib/voice';
  */
 
 const AARYA_API_BASE = "http://127.0.0.1:8000";
 let voiceEnabled = true;
 let stateChangeCallback = null;
 
-// Playlist Queue State Variables
+// Playlist Queue State Variables (Legacy / Fallback)
 let sentenceQueue = [];
 let currentSentenceIndex = 0;
 let currentAudioNode = null;
 let isSpeakingState = false;
+
+// Progressive Streaming State Variables
+let audioCtx = null;
+let nextPlayTime = 0;
+let isStreamingActive = false;
+let audioSourcesQueue = [];
 
 /**
  * Register a listener to be notified when speech playback starts or stops.
@@ -70,6 +79,22 @@ export function stopSpeaking() {
       currentAudioNode.src = ""; // instantly terminate active network socket
     } catch (_) {}
     currentAudioNode = null;
+  }
+  
+  // Stop and clear any active Web Audio stream player
+  isStreamingActive = false;
+  for (const source of audioSourcesQueue) {
+    try {
+      source.stop();
+    } catch (_) {}
+  }
+  audioSourcesQueue = [];
+  
+  if (audioCtx) {
+    try {
+      audioCtx.close();
+    } catch (_) {}
+    audioCtx = null;
   }
   
   sentenceQueue = [];
@@ -213,6 +238,113 @@ export function speakText(text, audioBytes = null, language = 'hinglish', voiceT
 
   // Start streaming queue
   playQueue(language, voiceType, voiceSpeed);
+}
+
+/**
+ * Helper to convert base64 String (Int16 raw PCM 24kHz) to Float32Array.
+ */
+function base64ToFloat32(base64Str) {
+  const binaryString = atob(base64Str);
+  const len = binaryString.length;
+  const buffer = new ArrayBuffer(len);
+  const view = new DataView(buffer);
+  for (let i = 0; i < len; i++) {
+    view.setUint8(i, binaryString.charCodeAt(i));
+  }
+  
+  const numSamples = len / 2;
+  const float32Array = new Float32Array(numSamples);
+  for (let i = 0; i < numSamples; i++) {
+    const int16 = view.getInt16(i * 2, true); // true for little endian
+    float32Array[i] = int16 / 32768.0;
+  }
+  return float32Array;
+}
+
+/**
+ * Starts a progressive Web Audio stream player.
+ */
+export function startAudioStream() {
+  if (typeof window === 'undefined') return;
+  if (!voiceEnabled) return;
+  
+  stopSpeaking(); // stop any current speech
+  
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return;
+  
+  audioCtx = new AudioContextClass();
+  nextPlayTime = audioCtx.currentTime;
+  isStreamingActive = true;
+  audioSourcesQueue = [];
+  
+  isSpeakingState = true;
+  if (stateChangeCallback) {
+    stateChangeCallback(true);
+  }
+  console.log("[voice.js] Web Audio progressive stream player started.");
+}
+
+/**
+ * Feeds a base64-encoded raw Int16 PCM chunk into the Web Audio scheduler.
+ */
+export function receiveAudioStreamChunk(base64PCM) {
+  if (!isStreamingActive || !audioCtx) return;
+  
+  try {
+    const float32Data = base64ToFloat32(base64PCM);
+    if (float32Data.length === 0) return;
+    
+    // Create an AudioBuffer at 24kHz mono (since Gemini native audio is 24kHz mono)
+    const audioBuffer = audioCtx.createBuffer(1, float32Data.length, 24000);
+    audioBuffer.copyToChannel(float32Data, 0);
+    
+    // Create source node
+    const source = audioCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioCtx.destination);
+    
+    // Schedule playback time
+    const startTime = Math.max(nextPlayTime, audioCtx.currentTime);
+    source.start(startTime);
+    
+    // Calculate when this chunk will end
+    const duration = audioBuffer.duration;
+    nextPlayTime = startTime + duration;
+    
+    // Save reference to stop later if needed
+    audioSourcesQueue.push(source);
+    
+    // Automatically clean up references when ended
+    source.onended = () => {
+      const idx = audioSourcesQueue.indexOf(source);
+      if (idx !== -1) {
+        audioSourcesQueue.splice(idx, 1);
+      }
+      
+      // If queue is empty and streaming is ended, notify speaking complete
+      if (audioSourcesQueue.length === 0 && !isStreamingActive) {
+        isSpeakingState = false;
+        if (stateChangeCallback) stateChangeCallback(false);
+      }
+    };
+    
+  } catch (err) {
+    console.error("[voice.js] Error receiving audio stream chunk:", err);
+  }
+}
+
+/**
+ * Signals that the progressive stream is finished.
+ */
+export function endAudioStream() {
+  console.log("[voice.js] Web Audio progressive stream ended.");
+  isStreamingActive = false;
+  // If no source is playing, we can complete speaking state immediately
+  if (audioSourcesQueue.length === 0) {
+    isSpeakingState = false;
+    if (stateChangeCallback) stateChangeCallback(false);
+  }
 }
 
 /**

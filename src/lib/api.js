@@ -1,7 +1,22 @@
 const AARYA_API_BASE = "http://127.0.0.1:8000";
 
 /**
+ * Helper to strictly clean code syntax/markdown out of spoken text.
+ */
+function strictlyCleanAudioText(rawLlmText) {
+  if (!rawLlmText) return "";
+  let cleanText = rawLlmText.replace(/```[a-zA-Z]*\n[\s\S]*?```/g, '');
+  cleanText = cleanText.replace(/`[^`]+`/g, '');
+  cleanText = cleanText.replace(/https?:\/\/\S+|www\.\S+/g, '');
+  cleanText = cleanText.replace(/[\*#`_\[\]\(\)]/g, '');
+  cleanText = cleanText.replace(/\s+/g, ' ').trim();
+  return cleanText;
+}
+
+/**
  * Send a message to AARYA and get a dual-response (detailed text + voice summary).
+ * Fully refactored to consume the new NDJSON stream backend while maintaining
+ * perfect backwards compatibility.
  * @param {string} message - The user's message text
  * @returns {Promise<{detailedText: string, voiceSummary: string, mood: string}>}
  */
@@ -17,28 +32,92 @@ export async function sendMessageToAarya(message, language = 'hinglish', voiceTy
       throw new Error(`AARYA responded with status ${res.status}`);
     }
 
-    const data = await res.json();
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    let detailedText = "";
+    let audioBytes = "";
 
-    // ── Phase 5+6: Extract dual-response with full fallback protection ──
-    const reply = data?.reply;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
 
-    const detailedText =
-      reply?.detailed_text ||
-      data?.aarya ||           // legacy fallback
-      "Response unavailable.";
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
 
-    const voiceSummary =
-      reply?.voice_summary ||
-      "Ayush, response screen par available hai.";
+      for (const line of lines) {
+        if (line.trim()) {
+          try {
+            const parsed = JSON.parse(line);
+            if (parsed.type === "text") {
+              detailedText += parsed.data;
+            } else if (parsed.type === "audio") {
+              audioBytes += parsed.data;
+            } else if (parsed.type === "error") {
+              throw new Error(parsed.data);
+            }
+          } catch (e) {
+            console.warn("Failed to parse NDJSON frame:", line, e);
+          }
+        }
+      }
+    }
 
     return {
-      detailedText: String(detailedText).trim(),
-      voiceSummary: String(voiceSummary).trim(),
-      audioBytes: reply?.audio_bytes || "",
-      mood: data?.mood || "neutral",
+      detailedText: detailedText.trim() || "Response unavailable.",
+      voiceSummary: strictlyCleanAudioText(detailedText).slice(0, 200),
+      audioBytes: audioBytes,
+      mood: "neutral",
     };
   } catch (error) {
     console.error("[AARYA API Error]:", error.message);
+    throw new Error("AARYA is unreachable. Backend may be offline.");
+  }
+}
+
+/**
+ * Send a message to AARYA and stream NDJSON chunks in real-time.
+ * @param {string} message - The user's message
+ * @param {function} onChunk - Callback executing on each parsed NDJSON line
+ */
+export async function sendMessageToAaryaStreaming(message, onChunk, language = 'hinglish', voiceType = 'female', voiceSpeed = 'fast') {
+  try {
+    const res = await fetch(`${AARYA_API_BASE}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, language, voice_type: voiceType, voice_speed: voiceSpeed }),
+    });
+
+    if (!res.ok) {
+      throw new Error(`AARYA responded with status ${res.status}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (line.trim()) {
+          try {
+            const parsed = JSON.parse(line);
+            onChunk(parsed);
+          } catch (e) {
+            console.warn("Failed to parse NDJSON frame:", line, e);
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error("[AARYA API Streaming Error]:", error.message);
     throw new Error("AARYA is unreachable. Backend may be offline.");
   }
 }
@@ -143,5 +222,3 @@ export async function scanMyScreen(prompt = '', language = 'english', voiceType 
     throw new Error("AARYA Vision Mode is unreachable. Backend may be offline.");
   }
 }
-
-
