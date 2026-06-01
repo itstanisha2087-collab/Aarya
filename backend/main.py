@@ -422,55 +422,77 @@ def pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes:
 VOICE_FALLBACK_CHAIN = ["Aoede", "Kore", "Fenrir", "Puck"]
 
 async def generate_gemini_audio_with_fallback(text: str, model_name: str = "gemini-2.5-flash-preview-tts") -> bytes:
-    if not client:
-        print("[AARYA/Audio] Error: Google GenAI Client is not initialized.")
-        return None
-        
-    # Build list of voices starting with active profile
-    voices = [AARYA_VOICE_PROFILE]
-    for v in VOICE_FALLBACK_CHAIN:
-        if v != AARYA_VOICE_PROFILE:
-            voices.append(v)
-            
-    # Try each voice in order
-    for voice_name in voices:
+    if client:
+        # Build list of voices starting with active profile
+        voices = [AARYA_VOICE_PROFILE]
+        for v in VOICE_FALLBACK_CHAIN:
+            if v != AARYA_VOICE_PROFILE:
+                voices.append(v)
+                
+        # Try each voice in order
+        for voice_name in voices:
+            try:
+                print(f"[AARYA/Audio] Generating native audio using voice: '{voice_name}' for: '{text[:50]}...'")
+                response = await client.aio.models.generate_content(
+                    model=model_name,
+                    contents=text,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["AUDIO"],
+                        speech_config=types.SpeechConfig(
+                            voice_config=types.VoiceConfig(
+                                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                    voice_name=voice_name
+                                )
+                            )
+                        ),
+                    ),
+                )
+                for part in response.candidates[0].content.parts:
+                    if part.inline_data is not None:
+                        return pcm_to_wav(part.inline_data.data)
+            except Exception as e:
+                print(f"[AARYA/Audio] Native voice '{voice_name}' failed: {e}. Trying next...")
+                
+        # Final fallback attempt using default settings (omitting voice config if needed)
         try:
-            print(f"[AARYA/Audio] Generating native audio using voice: '{voice_name}' for: '{text[:50]}...'")
+            print("[AARYA/Audio] Falling back to default prebuilt voice config")
             response = await client.aio.models.generate_content(
                 model=model_name,
                 contents=text,
                 config=types.GenerateContentConfig(
                     response_modalities=["AUDIO"],
-                    speech_config=types.SpeechConfig(
-                        voice_config=types.VoiceConfig(
-                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                voice_name=voice_name
-                            )
-                        )
-                    ),
                 ),
             )
             for part in response.candidates[0].content.parts:
                 if part.inline_data is not None:
                     return pcm_to_wav(part.inline_data.data)
         except Exception as e:
-            print(f"[AARYA/Audio] Native voice '{voice_name}' failed: {e}. Trying next...")
-            
-    # Final fallback attempt using default settings (omitting voice config if needed)
+            print(f"[AARYA/Audio] Default voice fallback also failed: {e}")
+    else:
+        print("[AARYA/Audio] Google GenAI Client is not initialized. Skipping Gemini attempts.")
+        
+    # Final robust fallback attempt using edge-tts
     try:
-        print("[AARYA/Audio] Falling back to default prebuilt voice config")
-        response = await client.aio.models.generate_content(
-            model=model_name,
-            contents=text,
-            config=types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-            ),
-        )
-        for part in response.candidates[0].content.parts:
-            if part.inline_data is not None:
-                return pcm_to_wav(part.inline_data.data)
+        print("[AARYA/Audio] Falling back to Microsoft edge-tts (NeerjaNeural)...")
+        import edge_tts
+        import io
+        
+        voice_str = "en-IN-NeerjaNeural"
+        if "male" in str(AARYA_VOICE_PROFILE).lower():
+            voice_str = "en-IN-PrabhatNeural"
+            
+        communicate = edge_tts.Communicate(text, voice_str)
+        buffer = io.BytesIO()
+        async for chunk in communicate.stream():
+            if chunk.get("type") == "audio" and chunk.get("data"):
+                buffer.write(chunk["data"])
+                
+        mp3_bytes = buffer.getvalue()
+        if len(mp3_bytes) > 0:
+            print(f"[AARYA/Audio] edge-tts successfully synthesized {len(mp3_bytes)} MP3 bytes.")
+            return mp3_bytes
     except Exception as e:
-        print(f"[AARYA/Audio] Default voice fallback also failed: {e}")
+        print(f"[AARYA/Audio] edge-tts fallback failed: {e}")
         
     return None
 
@@ -935,8 +957,12 @@ async def stream_groq_fallback(user_input: str, history: list):
                                     try:
                                         audio_bytes = await generate_gemini_audio_with_fallback(clean_sent)
                                         if audio_bytes:
-                                            raw_pcm = audio_bytes[44:] if len(audio_bytes) > 44 else audio_bytes
+                                            if audio_bytes.startswith(b"RIFF"):
+                                                raw_pcm = audio_bytes[44:] if len(audio_bytes) > 44 else audio_bytes
+                                            else:
+                                                raw_pcm = audio_bytes
                                             base64_audio = base64.b64encode(raw_pcm).decode("utf-8")
+                                            print(f"[AUDIO CHUNK YIELD]: Yielding {len(raw_pcm)} bytes (Groq fallback)")
                                             yield json.dumps({"type": "audio", "data": base64_audio}) + "\n"
                                     except Exception:
                                         pass
@@ -984,7 +1010,7 @@ async def stream_gemini_response(user_input: str, history: list):
         print(f"[AARYA/Stream] Spawning Gemini Content Stream using voice: {voice_name}")
         
         response_stream = await client_local.aio.models.generate_content_stream(
-            model='gemini-2.5-flash-preview-tts',
+            model='gemini-2.5-flash',
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=stream_prompt,
@@ -1011,7 +1037,9 @@ async def stream_gemini_response(user_input: str, history: list):
                 if part.text:
                     yield json.dumps({"type": "text", "data": part.text}) + "\n"
                 if part.inline_data:
-                    base64_audio = base64.b64encode(part.inline_data.data).decode("utf-8")
+                    audio_bytes = part.inline_data.data
+                    base64_audio = base64.b64encode(audio_bytes).decode("utf-8")
+                    print(f"[AUDIO CHUNK YIELD]: Yielding {len(audio_bytes)} bytes")
                     yield json.dumps({"type": "audio", "data": base64_audio}) + "\n"
                     
     except Exception as e:

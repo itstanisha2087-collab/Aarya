@@ -26,6 +26,8 @@ let audioCtx = null;
 let nextPlayTime = 0;
 let isStreamingActive = false;
 let audioSourcesQueue = [];
+let isDecoding = false;
+let chunkQueue = [];
 
 /**
  * Register a listener to be notified when speech playback starts or stops.
@@ -89,6 +91,8 @@ export function stopSpeaking() {
     } catch (_) {}
   }
   audioSourcesQueue = [];
+  chunkQueue = [];
+  isDecoding = false;
   
   if (audioCtx) {
     try {
@@ -273,7 +277,8 @@ export function startAudioStream() {
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   if (!AudioContextClass) return;
   
-  audioCtx = new AudioContextClass();
+  // Align AudioContext strictly to Gemini's 24kHz native sampling rate
+  audioCtx = new AudioContextClass({ sampleRate: 24000 });
   nextPlayTime = audioCtx.currentTime;
   isStreamingActive = true;
   audioSourcesQueue = [];
@@ -282,7 +287,7 @@ export function startAudioStream() {
   if (stateChangeCallback) {
     stateChangeCallback(true);
   }
-  console.log("[voice.js] Web Audio progressive stream player started.");
+  console.log("[voice.js] Web Audio progressive stream player started at 24kHz.");
 }
 
 /**
@@ -290,47 +295,87 @@ export function startAudioStream() {
  */
 export function receiveAudioStreamChunk(base64PCM) {
   if (!isStreamingActive || !audioCtx) return;
+  chunkQueue.push(base64PCM);
+  processChunkQueue();
+}
+
+async function processChunkQueue() {
+  if (isDecoding || chunkQueue.length === 0) return;
+  isDecoding = true;
   
+  const base64PCM = chunkQueue.shift();
   try {
-    const float32Data = base64ToFloat32(base64PCM);
-    if (float32Data.length === 0) return;
+    const binaryString = atob(base64PCM);
+    const len = binaryString.length;
+    const arrayBuffer = new ArrayBuffer(len);
+    const uint8Array = new Uint8Array(arrayBuffer);
+    for (let i = 0; i < len; i++) {
+      uint8Array[i] = binaryString.charCodeAt(i);
+    }
     
-    // Create an AudioBuffer at 24kHz mono (since Gemini native audio is 24kHz mono)
-    const audioBuffer = audioCtx.createBuffer(1, float32Data.length, 24000);
-    audioBuffer.copyToChannel(float32Data, 0);
+    let buffer = null;
     
-    // Create source node
-    const source = audioCtx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(audioCtx.destination);
+    // Detect format
+    const isWav = len > 4 && uint8Array[0] === 0x52 && uint8Array[1] === 0x49 && uint8Array[2] === 0x46 && uint8Array[3] === 0x46; // 'RIFF'
+    const isMp3 = len > 3 && (
+      (uint8Array[0] === 0x49 && uint8Array[1] === 0x44 && uint8Array[2] === 0x33) || // 'ID3'
+      (uint8Array[0] === 0xFF && (uint8Array[1] & 0xE0) === 0xE0) // sync frame
+    );
     
-    // Schedule playback time
-    const startTime = Math.max(nextPlayTime, audioCtx.currentTime);
-    source.start(startTime);
-    
-    // Calculate when this chunk will end
-    const duration = audioBuffer.duration;
-    nextPlayTime = startTime + duration;
-    
-    // Save reference to stop later if needed
-    audioSourcesQueue.push(source);
-    
-    // Automatically clean up references when ended
-    source.onended = () => {
-      const idx = audioSourcesQueue.indexOf(source);
-      if (idx !== -1) {
-        audioSourcesQueue.splice(idx, 1);
+    if (isWav || isMp3) {
+      try {
+        buffer = await audioCtx.decodeAudioData(arrayBuffer);
+      } catch (err) {
+        console.warn("[voice.js] Native decoding failed:", err);
       }
+    }
+    
+    if (!buffer) {
+      // Fallback to raw Int16 PCM (24kHz Mono)
+      const numSamples = len / 2;
+      const float32Data = new Float32Array(numSamples);
+      const dataView = new DataView(arrayBuffer);
+      for (let i = 0; i < numSamples; i++) {
+        const int16 = dataView.getInt16(i * 2, true);
+        float32Data[i] = int16 / 32768.0;
+      }
+      buffer = audioCtx.createBuffer(1, float32Data.length, 24000);
+      buffer.copyToChannel(float32Data, 0);
+    }
+    
+    if (buffer && buffer.length > 0) {
+      // Expose fallback audio logging exactly as requested
+      console.log('[Frontend Audio]: Playing chunk queue...', buffer.length);
       
-      // If queue is empty and streaming is ended, notify speaking complete
-      if (audioSourcesQueue.length === 0 && !isStreamingActive) {
-        isSpeakingState = false;
-        if (stateChangeCallback) stateChangeCallback(false);
-      }
-    };
-    
+      const source = audioCtx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(audioCtx.destination);
+      
+      const startTime = Math.max(nextPlayTime, audioCtx.currentTime);
+      source.start(startTime);
+      
+      const duration = buffer.duration;
+      nextPlayTime = startTime + duration;
+      
+      audioSourcesQueue.push(source);
+      
+      source.onended = () => {
+        const idx = audioSourcesQueue.indexOf(source);
+        if (idx !== -1) {
+          audioSourcesQueue.splice(idx, 1);
+        }
+        
+        if (audioSourcesQueue.length === 0 && !isStreamingActive && chunkQueue.length === 0) {
+          isSpeakingState = false;
+          if (stateChangeCallback) stateChangeCallback(false);
+        }
+      };
+    }
   } catch (err) {
-    console.error("[voice.js] Error receiving audio stream chunk:", err);
+    console.error("[voice.js] Error processing audio chunk:", err);
+  } finally {
+    isDecoding = false;
+    processChunkQueue();
   }
 }
 
