@@ -3,6 +3,19 @@ const path = require('path');
 const isDev = require('electron-is-dev');
 const http = require('http');
 
+// ── Single Instance Lock (Race Condition & Multiple Instances Prevention) ──
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  console.log('[AARYA/Electron] Duplicate instance detected. Terminating...');
+  app.quit();
+  process.exit(0);
+} else {
+  app.on('second-instance', () => {
+    console.log('[AARYA/Electron] Second instance triggered. Focus active window.');
+    showAaryaWindow();
+  });
+}
+
 let mainWindow = null;
 let tray = null;
 let server = null;
@@ -111,15 +124,16 @@ function pollFrontend(url, callback) {
 
 function showAaryaWindow() {
   if (mainWindow) {
-    mainWindow.restore(); // restore if minimized
     mainWindow.show();
+    mainWindow.restore();
     mainWindow.focus();
+    mainWindow.setAlwaysOnTop(true);
     
-    // Force always on top temporarily to grab desktop focus cleanly
-    mainWindow.setAlwaysOnTop(true, 'screen-saver');
     setTimeout(() => {
-      if (mainWindow) mainWindow.setAlwaysOnTop(false);
-    }, 1000);
+      if (mainWindow) {
+        mainWindow.setAlwaysOnTop(false);
+      }
+    }, 1500);
     
     // Send an IPC event to trigger Next.js cinematic wake overlay
     mainWindow.webContents.send('aarya-wake-event', true);
@@ -183,15 +197,44 @@ function startIpcServer() {
       return;
     }
 
-    if (req.url === '/wake' && req.method === 'POST') {
-      console.log('[AARYA/Electron] Received local IPC wake signal POST.');
-      showAaryaWindow();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', message: 'Woken' }));
-    } else {
-      res.writeHead(404);
-      res.end();
-    }
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      let data = {};
+      try {
+        if (body) data = JSON.parse(body);
+      } catch (_) {}
+
+      if (req.url === '/wake' && req.method === 'POST') {
+        console.log('[AARYA/Electron] Received local IPC wake signal POST.');
+        showAaryaWindow();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', message: 'Woken' }));
+      } 
+      else if (req.url === '/ambient-response' && req.method === 'POST') {
+        console.log('[AARYA/Electron] Received ambient response POST event.');
+        if (data.focus) {
+          showAaryaWindow();
+        }
+        if (mainWindow) {
+          mainWindow.webContents.send('aarya-ambient-response', data);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', message: 'Relayed' }));
+      } 
+      else if (req.url === '/stop' && req.method === 'POST') {
+        console.log('[AARYA/Electron] Received global stop-speech POST event.');
+        if (mainWindow) {
+          mainWindow.webContents.send('aarya-stop-speech', true);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', message: 'Stopped' }));
+      } 
+      else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
   });
 
   server.listen(3001, '127.0.0.1', () => {
@@ -208,8 +251,100 @@ ipcMain.on('wake-window-req', () => {
 // ── Minimize window IPC pathway ──
 ipcMain.on('minimize-window-req', () => {
   if (mainWindow) {
+    mainWindow.minimize();
+    console.log('[AARYA/Electron] Window minimized normally.');
+  }
+});
+
+// ── Maximize window IPC pathway ──
+ipcMain.on('maximize-window-req', () => {
+  if (mainWindow) {
+    if (mainWindow.isMaximized()) {
+      mainWindow.unmaximize();
+      console.log('[AARYA/Electron] Window unmaximized.');
+    } else {
+      mainWindow.maximize();
+      console.log('[AARYA/Electron] Window maximized.');
+    }
+  }
+});
+
+// ── Close window (Minimize to Tray) IPC pathway ──
+ipcMain.on('close-window-req', () => {
+  if (mainWindow) {
     mainWindow.hide();
-    console.log('[AARYA/Electron] Window minimized to tray via IPC.');
+    console.log('[AARYA/Electron] Window hidden (minimized to system tray) silently.');
+  }
+});
+
+// ── Native Multimodal Audio Playback & SAIL Controller ──
+const { execFile } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+
+let activeAudioProcess = null;
+
+ipcMain.on('play-audio', (event, base64Data) => {
+  console.log('[AARYA/Electron] play-audio request received');
+  
+  // Enforce SAIL: terminate any currently active playback
+  if (activeAudioProcess) {
+    try {
+      console.log('[SAIL] Terminating active audio subprocess forcefully');
+      activeAudioProcess.kill('SIGKILL');
+    } catch (_) {}
+    activeAudioProcess = null;
+  }
+  
+  if (!base64Data) {
+    event.sender.send('audio-playback-completed');
+    return;
+  }
+
+  const tmpPath = path.join(os.tmpdir(), `aarya_audio_${Date.now()}.wav`);
+  try {
+    const audioBuffer = Buffer.from(base64Data, 'base64');
+    fs.writeFileSync(tmpPath, audioBuffer);
+    
+    // Platform-native playback
+    if (process.platform === 'win32') {
+      activeAudioProcess = execFile('powershell', [
+        '-c', `(New-Object Media.SoundPlayer "${tmpPath}").PlaySync()`
+      ], () => {
+        try { fs.unlinkSync(tmpPath); } catch (_) {}
+        activeAudioProcess = null;
+        console.log('[AARYA/Electron] Windows native playback completed');
+        event.sender.send('audio-playback-completed');
+      });
+    } else if (process.platform === 'darwin') {
+      activeAudioProcess = execFile('afplay', [tmpPath], () => {
+        try { fs.unlinkSync(tmpPath); } catch (_) {}
+        activeAudioProcess = null;
+        console.log('[AARYA/Electron] macOS native playback completed');
+        event.sender.send('audio-playback-completed');
+      });
+    } else {
+      activeAudioProcess = execFile('aplay', [tmpPath], () => {
+        try { fs.unlinkSync(tmpPath); } catch (_) {}
+        activeAudioProcess = null;
+        console.log('[AARYA/Electron] Linux native playback completed');
+        event.sender.send('audio-playback-completed');
+      });
+    }
+  } catch (err) {
+    console.error('[AARYA/Electron] Native playback error:', err.message);
+    event.sender.send('audio-playback-completed');
+  }
+});
+
+ipcMain.on('stop-audio', () => {
+  console.log('[AARYA/Electron] stop-audio request received');
+  if (activeAudioProcess) {
+    try {
+      console.log('[SAIL] Stopping active audio subprocess forcefully');
+      activeAudioProcess.kill('SIGKILL');
+    } catch (_) {}
+    activeAudioProcess = null;
   }
 });
 

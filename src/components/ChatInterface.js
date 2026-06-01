@@ -4,8 +4,8 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { sendMessageToAarya, transcribeAudio, sendHeartbeat, checkWakeStatus } from '@/lib/api';
-import { speakText, stopSpeaking, setVoiceEnabled, isVoiceEnabled } from '@/lib/voice';
+import { sendMessageToAarya, transcribeAudio, sendHeartbeat, checkWakeStatus, scanMyScreen } from '@/lib/api';
+import { speakText, stopSpeaking, setVoiceEnabled, isVoiceEnabled, onPlaybackStateChange } from '@/lib/voice';
 import { startWakeWord, stopWakeWord, isWakeWordSupported } from '@/lib/wakeWord';
 import HistoryPanel from './HistoryPanel';
 import styles from './ChatInterface.module.css';
@@ -77,7 +77,7 @@ export default function ChatInterface() {
     {
       id: 'welcome-0',
       role: 'ai',
-      text: 'Aur Ayush bhai! Main hoon AARYA — tera apna AI bestie. Bol, kya chal raha hai?',
+      text: "What's up, Ayush! I am AARYA — your elite engineering partner. Let me know what complex systems we are building today.",
       timestamp: Date.now(),
       mood: 'neutral',
     },
@@ -91,6 +91,65 @@ export default function ChatInterface() {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [voiceOn, setVoiceOn] = useState(true);
   const [wakeGlow, setWakeGlow] = useState(false);   // wake word detection glow
+
+  // ── Dynamic Voice Settings States ──
+  const [language, setLanguage] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('aarya_language') || 'english';
+    }
+    return 'english';
+  });
+  
+  const [voiceType, setVoiceType] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('aarya_voice_type') || 'female';
+    }
+    return 'female';
+  });
+
+  // Persist selections across sessions
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('aarya_language', language);
+    }
+  }, [language]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('aarya_voice_type', voiceType);
+    }
+  }, [voiceType]);
+
+  const [voiceSpeed, setVoiceSpeed] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('aarya_voice_speed') || 'fast';
+    }
+    return 'fast';
+  });
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('aarya_voice_speed', voiceSpeed);
+    }
+  }, [voiceSpeed]);
+
+  const [isSpeaking, setIsSpeaking] = useState(false);
+
+  // Sync speech playback states to animate glowing voice orb and coordinate listener mute states
+  useEffect(() => {
+    onPlaybackStateChange((speaking) => {
+      setIsSpeaking(speaking);
+      // Notify backend speaking status asynchronously
+      fetch('http://127.0.0.1:8000/api/playback-state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_playing: speaking })
+      }).catch(err => console.warn('[AARYA] Failed to sync playback state:', err));
+    });
+    return () => {
+      onPlaybackStateChange(null);
+    };
+  }, []);
 
   // ── Input Mode Routing ──
   // Tracks whether the current interaction originated from voice or keyboard.
@@ -124,6 +183,9 @@ export default function ChatInterface() {
   // manual sends never pass it.
   // ══════════════════════════════════════════
   const handleSend = useCallback(async (overrideText, fromVoice = false) => {
+    // Halts any ongoing assistant speech immediately when a new prompt is submitted
+    stopSpeaking();
+
     const text = (overrideText ?? inputValue).trim();
     if (!text || loading) return;
 
@@ -144,7 +206,7 @@ export default function ChatInterface() {
     setLoading(true);
 
     try {
-      const data = await sendMessageToAarya(text);
+      const data = await sendMessageToAarya(text, language, voiceType, voiceSpeed);
       await new Promise((r) => setTimeout(r, 400));
 
       // ── Phase 5: Use detailedText for screen rendering ──
@@ -161,7 +223,7 @@ export default function ChatInterface() {
       // Speak ONLY if this response originated from a voice interaction.
       // Phase 5+6: Use voiceSummary (clean spoken text) — never detailedText.
       if (voiceModeRef.current) {
-        speakText(data.voiceSummary);  // short, clean, spoken Hinglish
+        speakText(data.voiceSummary, data.audioBytes, language, voiceType, voiceSpeed);  // short, clean, spoken Hinglish
         deactivateVoiceMode();          // reset after speaking
       }
 
@@ -180,7 +242,7 @@ export default function ChatInterface() {
       setLoading(false);
       setTimeout(() => inputRef.current?.focus(), 100);
     }
-  }, [inputValue, loading, deactivateVoiceMode]);
+  }, [inputValue, loading, deactivateVoiceMode, language, voiceType]);
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -193,6 +255,9 @@ export default function ChatInterface() {
   // VOICE RECORDING FLOW
   // ══════════════════════════════════════════
   const startRecording = useCallback(async () => {
+    // Halts any ongoing assistant speech immediately when the user taps to record
+    stopSpeaking();
+
     if (isRecording || mediaRecorderRef.current) return;
 
     try {
@@ -233,7 +298,7 @@ export default function ChatInterface() {
         // Transcribe
         setIsTranscribing(true);
         try {
-          const transcribedText = await transcribeAudio(blob, filename);
+          const transcribedText = await transcribeAudio(blob, filename, language);
           if (transcribedText?.trim()) {
             // ── Voice mode must be active before handleSend is called ──
             // activateVoiceMode() was already called when recording started
@@ -247,16 +312,8 @@ export default function ChatInterface() {
             deactivateVoiceMode();
           }
         } catch (err) {
-          console.error('[ChatInterface] Transcription error:', err.message);
-          const errMsg = {
-            id: `err-${Date.now()}`,
-            role: 'ai',
-            text: 'Mic sun nahi paya... dobara try kar! 🎙️',
-            timestamp: Date.now(),
-            mood: 'error',
-            isError: true,
-          };
-          setMessages(prev => [...prev, errMsg]);
+          console.warn('[ChatInterface] Transcription error handled gracefully:', err.message);
+          deactivateVoiceMode();
         } finally {
           setIsTranscribing(false);
         }
@@ -277,7 +334,7 @@ export default function ChatInterface() {
         const errMsg = {
           id: `err-${Date.now()}`,
           role: 'ai',
-          text: 'Mic permission nahi mili bhai! Browser settings mein allow kar. 🔒',
+          text: 'Microphone permission denied. Please allow microphone access in browser settings. 🔒',
           timestamp: Date.now(),
           mood: 'error',
           isError: true,
@@ -285,7 +342,7 @@ export default function ChatInterface() {
         setMessages(prev => [...prev, errMsg]);
       }
     }
-  }, [isRecording, handleSend]);
+  }, [isRecording, handleSend, language]);
 
   const stopRecording = useCallback((silent = false) => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
@@ -313,6 +370,59 @@ export default function ChatInterface() {
     setVoiceOn(newState);
     setVoiceEnabled(newState);
   }, [voiceOn]);
+
+  // ── Vision Scan Mode ──
+  const handleVisionScan = useCallback(async () => {
+    // Halts any ongoing assistant speech immediately when the user taps vision scan
+    stopSpeaking();
+
+    if (loading || isRecording || isTranscribing) return;
+
+    const customPrompt = inputValue.trim();
+    const userMsgText = customPrompt ? `[Vision Scan] ${customPrompt}` : "[Vision Scan] Analyze my screen";
+
+    const userMsg = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      text: userMsgText,
+      timestamp: Date.now(),
+    };
+
+    setMessages((prev) => [...prev, userMsg]);
+    setInputValue('');
+    setLoading(true);
+
+    try {
+      const data = await scanMyScreen(customPrompt, language, voiceType, voiceSpeed);
+      await new Promise((r) => setTimeout(r, 400));
+
+      const aiMsg = {
+        id: `ai-${Date.now()}`,
+        role: 'ai',
+        text: data.detailedText,
+        timestamp: Date.now(),
+        mood: data.mood || 'neutral',
+      };
+      setMessages((prev) => [...prev, aiMsg]);
+
+      if (voiceOn && data.voiceSummary) {
+        speakText(data.voiceSummary, data.audioBytes, language, voiceType, voiceSpeed);
+      }
+    } catch (err) {
+      const errorMsg = {
+        id: `err-${Date.now()}`,
+        role: 'ai',
+        text: 'Yaar screen capture ya vision analysis fail ho gaya... backend logs check kar.',
+        timestamp: Date.now(),
+        mood: 'error',
+        isError: true,
+      };
+      setMessages((prev) => [...prev, errorMsg]);
+    } finally {
+      setLoading(false);
+      setTimeout(() => inputRef.current?.focus(), 100);
+    }
+  }, [inputValue, loading, isRecording, isTranscribing, language, voiceType, voiceSpeed, voiceOn]);
 
   // ── Mood indicator color ──
   const getMoodColor = (mood) => {
@@ -392,13 +502,12 @@ export default function ChatInterface() {
           triggerWakeNotification();
         }
 
-        speakText("Yes Ayush, I am listening!");
-        setTimeout(() => { startRecording(); }, 1200);
+        setTimeout(() => { startRecording(); }, 800);
       });
     }
 
     return () => { stopWakeWord(); };
-  }, [isRecording, isTranscribing, loading, isVoiceMode, activateVoiceMode, startRecording]);
+  }, [isRecording, isTranscribing, loading, isVoiceMode, activateVoiceMode, startRecording, language, voiceType, voiceSpeed]);
 
   // ── Cleanup mic stream and recorder on unmount ──
   useEffect(() => {
@@ -413,6 +522,61 @@ export default function ChatInterface() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stopRecording]);
+
+  // ── Ambient Assistant Listeners (from Electron) ──
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.electronAPI) return;
+
+    console.log('[ChatInterface] Subscribing to Electron ambient and stop-speech event listeners.');
+
+    const unsubscribeAmbient = window.electronAPI.onAmbientResponse((data) => {
+      console.log('[ChatInterface] Received ambient response event from Electron:', data);
+      
+      // Stop any ongoing speech before processing new one
+      stopSpeaking();
+
+      // Create message objects for the user and assistant
+      const userMsg = {
+        id: `user-${Date.now()}`,
+        role: 'user',
+        text: data.query,
+        timestamp: Date.now(),
+      };
+      
+      const aiMsg = {
+        id: `ai-${Date.now() + 1}`,
+        role: 'ai',
+        text: data.detailedText,
+        timestamp: Date.now(),
+        mood: data.mood || 'neutral',
+      };
+
+      setMessages((prev) => [...prev, userMsg, aiMsg]);
+
+      // Speak the voice summary (since ambient mode is a background voice response, we always read it)
+      if (data.voiceSummary) {
+        speakText(data.voiceSummary, data.audio_bytes || data.audioBytes, language, voiceType, voiceSpeed);
+      }
+    });
+
+    const unsubscribeStop = window.electronAPI.onStopSpeech(() => {
+      console.log('[ChatInterface] Received global stop speech signal.');
+      stopSpeaking();
+    });
+
+    const unsubscribeWake = window.electronAPI.onWake((value) => {
+      console.log('[ChatInterface] Received window wake event:', value);
+      playJarvisBeep();
+      setWakeGlow(true);
+      setTimeout(() => setWakeGlow(false), 3000);
+    });
+
+    return () => {
+      if (unsubscribeAmbient) unsubscribeAmbient();
+      if (unsubscribeStop) unsubscribeStop();
+      if (unsubscribeWake) unsubscribeWake();
+    };
+  }, [language, voiceType, voiceSpeed]);
 
   // ── Desktop Runtime Auto-Connect & Heartbeat ──
   useEffect(() => {
@@ -430,10 +594,9 @@ export default function ChatInterface() {
         activateVoiceMode();
         setWakeGlow(true);
         setTimeout(() => setWakeGlow(false), 3000);
-        speakText("Yes Ayush, I am listening!");
         setTimeout(() => {
           startRecording();
-        }, 1000);
+        }, 800);
 
         // Sanitize the URL immediately
         const cleanUrl = new URL(window.location.href);
@@ -479,14 +642,14 @@ export default function ChatInterface() {
             >
               AARYA ACTIVATED
             </motion.h2>
-            <p className={styles.wakeSub}>Haa bhai Ayush, bol... I am listening! 🎙️</p>
+            <p className={styles.wakeSub}>Listening actively, Ayush. Go ahead... 🎙️</p>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* ── Listening Orb (shows while recording) ── */}
+      {/* ── Listening/Speaking Voice Orb ── */}
       <AnimatePresence>
-        {(isRecording || isTranscribing) && (
+        {(isRecording || isTranscribing || isSpeaking) && (
           <motion.div
             className={styles.voiceOrbContainer}
             initial={{ opacity: 0, scale: 0.6 }}
@@ -494,13 +657,13 @@ export default function ChatInterface() {
             exit={{ opacity: 0, scale: 0.6 }}
             transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
           >
-            <div className={isTranscribing ? styles.voiceOrbTranscribing : styles.voiceOrb}>
+            <div className={isTranscribing ? styles.voiceOrbTranscribing : isSpeaking ? styles.voiceOrbSpeaking : styles.voiceOrb}>
               <div className={styles.voiceOrbCore} />
               <div className={styles.voiceOrbRing1} />
               <div className={styles.voiceOrbRing2} />
             </div>
             <span className={styles.voiceOrbLabel}>
-              {isTranscribing ? 'processing…' : 'listening…'}
+              {isTranscribing ? 'processing…' : isSpeaking ? 'speaking…' : 'listening…'}
             </span>
           </motion.div>
         )}
@@ -548,9 +711,45 @@ export default function ChatInterface() {
               <polyline points="12 6 12 12 16 14" />
             </svg>
           </button>
+
+          {/* Native Window Controls */}
+          {typeof window !== 'undefined' && window.ipcRenderer && (
+            <div className={styles.windowControls}>
+              {/* Minimize */}
+              <button
+                className={styles.winControlBtn}
+                onClick={() => window.ipcRenderer.send('minimize-window-req')}
+                title="Minimize"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+              </button>
+              {/* Maximize */}
+              <button
+                className={styles.winControlBtn}
+                onClick={() => window.ipcRenderer.send('maximize-window-req')}
+                title="Maximize"
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                </svg>
+              </button>
+              {/* Close (Minimize to Tray) */}
+              <button
+                className={`${styles.winControlBtn} ${styles.winControlBtnClose}`}
+                onClick={() => window.ipcRenderer.send('close-window-req')}
+                title="Close to Tray"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+          )}
         </div>
       </div>
-
       {/* ── Messages Area ── */}
       <div className={styles.messagesArea} id="chat-messages-area">
         {messages.map((msg, index) => (
@@ -617,6 +816,63 @@ export default function ChatInterface() {
 
       {/* ── Glassmorphism Input Bar ── */}
       <div className={styles.inputArea}>
+        {/* ── Premium Glassmorphism Voice Controls ── */}
+        <div className={styles.voiceSettingsBar}>
+          <div className={styles.voiceSelectContainer}>
+            <span className={styles.voiceSelectLabel}>Language</span>
+            <select
+              value={language}
+              onChange={(e) => setLanguage(e.target.value)}
+              className={styles.voiceSelect}
+              id="voice-language-selector"
+              disabled
+            >
+              <option value="english">English (India)</option>
+            </select>
+          </div>
+
+          <div className={styles.voiceSelectContainer}>
+            <span className={styles.voiceSelectLabel}>Voice</span>
+            <select
+              value={voiceType}
+              onChange={(e) => setVoiceType(e.target.value)}
+              className={styles.voiceSelect}
+              id="voice-gender-selector"
+            >
+              <option value="female">Female</option>
+              <option value="male">Male</option>
+            </select>
+          </div>
+
+          <div className={styles.voiceSelectContainer}>
+            <span className={styles.voiceSelectLabel}>Speed</span>
+            <select
+              value={voiceSpeed}
+              onChange={(e) => setVoiceSpeed(e.target.value)}
+              className={styles.voiceSelect}
+              id="voice-speed-selector"
+            >
+              <option value="normal">Normal</option>
+              <option value="fast">Fast</option>
+              <option value="gemini live">Gemini Live</option>
+            </select>
+          </div>
+
+          <button
+            className={styles.visionBtn}
+            onClick={handleVisionScan}
+            disabled={loading || isRecording || isTranscribing}
+            id="vision-scan-btn"
+            title="Scan current screen and get AI insight"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ marginRight: '6px' }}>
+              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+              <circle cx="12" cy="13" r="4"/>
+            </svg>
+            Scan My Screen
+          </button>
+        </div>
+
         <div className={`${styles.inputPill} ${isRecording ? styles.inputPillRecording : ''}`}>
           <input
             ref={inputRef}

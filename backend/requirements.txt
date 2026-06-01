@@ -6,3 +6,4 @@ python-dotenv
 tavily-python
 supabase
 python-multipart
+google-genai
