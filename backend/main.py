@@ -892,7 +892,7 @@ def _make_frame(seq: int, frame_type: str, data: str) -> str:
         "data": data
     }) + "\n"
 
-async def _auto_transition_to_active_task(delay: float = 5.0):
+async def _auto_transition_to_active_task(delay: float = 2.0):
     await asyncio.sleep(delay)
     async with _state_lock:
         if await fsm.get_state() == AARYAState.CONFIRM:
@@ -1090,30 +1090,49 @@ async def api_wake():
     async with _state_lock:
         state = await fsm.get_state()
         if state == AARYAState.DORMANT:
+            # 1. Transition FSM to CONFIRM (State-1)
             await fsm.force_state(AARYAState.CONFIRM, greeting_played=True)
             
-            # Retrieve pre-cached WAV directly from FSM memory (0ms latency disk bypass)
-            audio_bytes = fsm.get_cached_greeting_wav()
-            if not audio_bytes:
-                wav_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "confirm_yes_sir.wav")
-                if not os.path.exists(wav_path):
-                    wav_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fallback_confirm.wav")
-                if os.path.exists(wav_path):
-                    try:
-                        with open(wav_path, "rb") as f:
-                            audio_bytes = f.read()
-                    except Exception as e:
-                        print(f"[AARYA] Failed to read cached activation WAV: {e}")
-            
-            if not audio_bytes:
-                audio_bytes = await generate_gemini_audio_with_fallback("Yes sir, I am listening.")
-                
-            base64_audio = base64.b64encode(audio_bytes).decode("utf-8") if audio_bytes else ""
-            
+            # 2. Initiate absolute guaranteed 2-second watchdog timer to ACTIVE (State-2)
             if _auto_transition_task and not _auto_transition_task.done():
                 _auto_transition_task.cancel()
-                
-            _auto_transition_task = asyncio.create_task(_auto_transition_to_active_task(5.0))
+            _auto_transition_task = asyncio.create_task(_auto_transition_to_active_task(2.0))
+            
+            # 3. Retrieve pre-cached WAV directly from FSM memory (0ms latency disk bypass)
+            audio_bytes = None
+            try:
+                audio_bytes = fsm.get_cached_greeting_wav()
+                if not audio_bytes:
+                    wav_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "confirm_yes_sir.wav")
+                    if not os.path.exists(wav_path):
+                        wav_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fallback_confirm.wav")
+                    if os.path.exists(wav_path):
+                        with open(wav_path, "rb") as f:
+                            audio_bytes = f.read()
+            except Exception as e:
+                print(f"[AARYA WAKE EMERGENCY FALLBACK] Local file read failed: {e}")
+            
+            # 4. Try generating fallback TTS if audio loading failed, wrapped in a strict try-except
+            if not audio_bytes:
+                try:
+                    audio_bytes = await generate_gemini_audio_with_fallback("Yes sir, I am listening.")
+                except Exception as e:
+                    print(f"[AARYA WAKE EMERGENCY FALLBACK] Fallback voice generation failed: {e}")
+                    audio_bytes = None
+            
+            base64_audio = base64.b64encode(audio_bytes).decode("utf-8") if audio_bytes else ""
+            
+            # 5. Smooth fallback to lightweight textual response if audio retrieval completely fails
+            if not base64_audio:
+                print("[AARYA WAKE EMERGENCY FALLBACK] Audio loading completely failed! Immediately advancing FSM state flag to ACTIVE to break any 403 locks.")
+                await fsm.on_activation_complete()
+                if _auto_transition_task and not _auto_transition_task.done():
+                    _auto_transition_task.cancel()
+                return {
+                    "status": "activated",
+                    "greeting": "Yes sir, I am listening. (Audio unavailable, state auto-advanced)",
+                    "audio_bytes": ""
+                }
             
             return {
                 "status": "activated",

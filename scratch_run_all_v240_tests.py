@@ -48,9 +48,9 @@ def test_fsm_lockout_and_watchdog():
     assert res.status_code == 403, f"Expected 403 Forbidden but got {res.status_code}"
     print("[PASS] State-1 strictly rejected direct query with 403 Forbidden!")
     
-    # Wait for the 5-second session safety watchdog to fire
-    print("Sleeping 6.0 seconds to wait for FSM Watchdog timer...")
-    time.sleep(6.0)
+    # Wait for the 2-second session safety watchdog to fire
+    print("Sleeping 3.0 seconds to wait for FSM Watchdog timer...")
+    time.sleep(3.0)
     
     # Verify auto-transition to ACTIVE (State 2)
     res = requests.get(f"{BACKEND_BASE}/api/v1/state")
