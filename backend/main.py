@@ -46,6 +46,7 @@ from google.genai import types
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 AARYA_VOICE_PROFILE = os.getenv("AARYA_VOICE_PROFILE", "Aoede")
 client = None
+conversation_history = []
 
 if GEMINI_API_KEY:
     try:
@@ -156,15 +157,33 @@ if SUPABASE_URL and SUPABASE_KEY:
         print(f"[AARYA] Warning: Failed to initialize Supabase client: {e}")
 
 @app.on_event("startup")
-def startup_event():
+async def startup_event():
+    print("[Startup] AARYA Backend v2.5.0 initializing...")
+    
+    # 1. Supabase Check
     if not supabase:
         print("[SUPABASE] CONNECTION FAILED: Client not initialized.")
-        return
-    try:
-        supabase.table("chat_history").select("*").limit(1).execute()
-        print("[SUPABASE] CONNECTED SUCCESSFULLY")
-    except Exception as e:
-        print(f"[SUPABASE] CONNECTION FAILED: {str(e)}")
+    else:
+        try:
+            supabase.table("chat_history").select("*").limit(1).execute()
+            print("[SUPABASE] CONNECTED SUCCESSFULLY")
+        except Exception as e:
+            print(f"[SUPABASE] CONNECTION FAILED: {str(e)}")
+            
+    # 2. Warm-up Handshake
+    from startup import run_warmup_handshake
+    result = await run_warmup_handshake()
+    app.state.api_status = result["status"]
+    
+    if result["status"] == "CONFIG_ERROR":
+        print(f"[Startup] API key invalid. Voice pipeline will not function. {result}")
+        app.state.mic_handler_enabled = False
+    elif result["status"] == "AVAILABLE":
+        print("[Startup] Gemini API reachable. Voice pipeline ready.")
+        app.state.mic_handler_enabled = True
+    else:
+        print(f"[Startup] API degraded. Will retry on first query. {result}")
+        app.state.mic_handler_enabled = True
 
 # ── Memory Functions ──
 def get_chat_history(user_id, limit=20):
@@ -435,15 +454,19 @@ def pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 24000) -> bytes:
 
 VOICE_FALLBACK_CHAIN = ["Aoede", "Kore", "Fenrir", "Puck"]
 
-async def generate_gemini_audio_with_fallback(text: str, model_name: str = "gemini-2.5-flash-preview-tts") -> bytes:
+async def generate_gemini_audio_with_fallback(text: str, model_name: str = "gemini-2.5-flash") -> bytes:
+    """
+    Generates audio bytes using Gemini native multimodal audio ONLY.
+    NO pyttsx3, NO edge_tts, NO SAPI fallbacks.
+    Returns PCM WAV bytes.
+    """
+    # AI Studio Gemini 2.5 Flash only supports audio output under the -preview-tts variant.
+    if model_name == "gemini-2.5-flash":
+        model_name = "gemini-2.5-flash-preview-tts"
+
     if client:
-        # Build list of voices starting with active profile
-        voices = [AARYA_VOICE_PROFILE]
-        for v in VOICE_FALLBACK_CHAIN:
-            if v != AARYA_VOICE_PROFILE:
-                voices.append(v)
-                
-        # Try each voice in order
+        # Try each voice in order: Aoede, Kore, Fenrir
+        voices = ["Aoede", "Kore", "Fenrir"]
         for voice_name in voices:
             try:
                 print(f"[AARYA/Audio] Generating native audio using voice: '{voice_name}' for: '{text[:50]}...'")
@@ -466,47 +489,8 @@ async def generate_gemini_audio_with_fallback(text: str, model_name: str = "gemi
                         return pcm_to_wav(part.inline_data.data)
             except Exception as e:
                 print(f"[AARYA/Audio] Native voice '{voice_name}' failed: {e}. Trying next...")
-                
-        # Final fallback attempt using default settings (omitting voice config if needed)
-        try:
-            print("[AARYA/Audio] Falling back to default prebuilt voice config")
-            response = await client.aio.models.generate_content(
-                model=model_name,
-                contents=text,
-                config=types.GenerateContentConfig(
-                    response_modalities=["AUDIO"],
-                ),
-            )
-            for part in response.candidates[0].content.parts:
-                if part.inline_data is not None:
-                    return pcm_to_wav(part.inline_data.data)
-        except Exception as e:
-            print(f"[AARYA/Audio] Default voice fallback also failed: {e}")
     else:
-        print("[AARYA/Audio] Google GenAI Client is not initialized. Skipping Gemini attempts.")
-        
-    # Final robust fallback attempt using edge-tts
-    try:
-        print("[AARYA/Audio] Falling back to Microsoft edge-tts (NeerjaNeural)...")
-        import edge_tts
-        import io
-        
-        voice_str = "en-IN-NeerjaNeural"
-        if "male" in str(AARYA_VOICE_PROFILE).lower():
-            voice_str = "en-IN-PrabhatNeural"
-            
-        communicate = edge_tts.Communicate(text, voice_str)
-        buffer = io.BytesIO()
-        async for chunk in communicate.stream():
-            if chunk.get("type") == "audio" and chunk.get("data"):
-                buffer.write(chunk["data"])
-                
-        mp3_bytes = buffer.getvalue()
-        if len(mp3_bytes) > 0:
-            print(f"[AARYA/Audio] edge-tts successfully synthesized {len(mp3_bytes)} MP3 bytes.")
-            return mp3_bytes
-    except Exception as e:
-        print(f"[AARYA/Audio] edge-tts fallback failed: {e}")
+        print("[AARYA/Audio] Google GenAI Client is not initialized.")
         
     return None
 
@@ -844,6 +828,17 @@ def aarya_agent(user_message, history, language="english", voice_speed="fast"):
 def home():
     return {"message": "AARYA Brain is Online! (Agentic + Groq + Tavily)", "status": "active"}
 
+@app.get("/health")
+async def health():
+    from config import GEMINI_MODEL
+    return {
+        "status": "ok",
+        "model": GEMINI_MODEL,
+        "voice_pipeline": "gemini_native_only",
+        "legacy_tts": "purged",
+        "version": "2.5.0"
+    }
+
 is_speaking = False
 
 @app.post("/api/playback-state")
@@ -960,16 +955,56 @@ async def route_query(request: QueryRequest):
 
     fsm.ping_activity()
 
+    from config import GEMINI_MODEL
+    
     return StreamingResponse(
-        _stream_query(request.text),
+        _stream_query_interceptor(request.text),
         media_type="application/x-ndjson",
         headers={
+            "X-AARYA-Model": GEMINI_MODEL,
+            "X-AARYA-Voice": AARYA_VOICE_PROFILE,
             "X-Accel-Buffering": "no",
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "Transfer-Encoding": "chunked",
         },
     )
+
+async def _stream_query_interceptor(user_text: str):
+    global conversation_history
+    
+    from config import (
+        GEMINI_MODEL,
+        STREAM_TIMEOUT_SECONDS,
+        MAX_RETRY_ATTEMPTS,
+        RETRY_BACKOFF_SECONDS,
+    )
+    from stream_interceptor import GeminiStreamInterceptor
+
+    interceptor = GeminiStreamInterceptor(
+        model=GEMINI_MODEL,
+        voice=AARYA_VOICE_PROFILE,  # Use current active profile voice
+        timeout=STREAM_TIMEOUT_SECONDS,
+        max_retries=MAX_RETRY_ATTEMPTS,
+        retry_backoff=RETRY_BACKOFF_SECONDS,
+    )
+
+    text_parts = []
+    async for frame in interceptor.stream(query=user_text, history=conversation_history):
+        yield frame
+        
+        # Accumulate text chunks to update conversation history
+        try:
+            parsed = json.loads(frame.strip())
+            if parsed.get("type") == "text":
+                text_parts.append(parsed.get("data", ""))
+        except Exception:
+            pass
+
+    full_text = "".join(text_parts)
+    if full_text:
+        _append_history("user", user_text)
+        _append_history("model", full_text)
 
 async def stream_groq_fallback(user_input: str, history: list, start_seq: int = 0):
     seq = start_seq
@@ -1068,81 +1103,6 @@ def _make_frame(seq: int, frame_type: str, data) -> str:
         ensure_ascii=False,
     ) + "\n"
 
-async def _stream_query(user_text: str):
-    """
-    Core async generator — yields NDJSON frames from Gemini streaming API.
-    """
-    global conversation_history
-
-    seq = 0
-    text_parts: list[str] = []
-
-    def nxt() -> int:
-        nonlocal seq
-        seq += 1
-        return seq
-
-    messages = conversation_history + [
-        {"role": "user", "parts": [{"text": user_text}]}
-    ]
-
-    audio_config = types.GenerateContentConfig(
-        response_modalities=["TEXT", "AUDIO"],
-        speech_config=types.SpeechConfig(
-            voice_config=types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                    voice_name=AARYA_VOICE_PROFILE
-                )
-            )
-        ),
-        system_instruction=AARYA_SYSTEM_PROMPT,
-    )
-
-    try:
-        stream_coroutine = client.aio.models.generate_content_stream(
-            model=AARYA_MODEL,
-            contents=messages,
-            config=audio_config,
-        )
-
-        async for chunk in await asyncio.wait_for(
-            stream_coroutine, timeout=STREAM_TIMEOUT_S
-        ):
-            if not chunk.candidates:
-                continue
-
-            for part in chunk.candidates[0].content.parts:
-                if part.text:
-                    text_parts.append(part.text)
-                    yield _make_frame(nxt(), "text", part.text)
-
-                if part.inline_data and part.inline_data.data:
-                    encoded = base64.b64encode(
-                        part.inline_data.data
-                    ).decode("ascii")
-                    yield _make_frame(nxt(), "audio", encoded)
-
-        yield _make_frame(nxt(), "done", None)
-
-        full_text = "".join(text_parts)
-        if full_text:
-            _append_history("user", user_text)
-            _append_history("model", full_text)
-
-    except asyncio.CancelledError:
-        logger.info("[AARYA Stream] Client disconnected at seq=%d", seq)
-        return
-
-    except asyncio.TimeoutError:
-        yield _make_frame(
-            nxt(), "error",
-            f"Gemini stream timeout after {STREAM_TIMEOUT_S}s"
-        )
-
-    except Exception as exc:
-        logger.error("[AARYA Stream] Exception at seq=%d: %s. Falling back to Groq stream...", seq, exc)
-        async for frame in stream_groq_fallback(user_text, messages[:-1], start_seq=seq):
-            yield frame
 
 def _append_history(role: str, text: str) -> None:
     global conversation_history
