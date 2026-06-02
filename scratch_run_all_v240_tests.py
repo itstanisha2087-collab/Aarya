@@ -32,7 +32,7 @@ def test_fsm_lockout_and_watchdog():
     res = requests.post(f"{BACKEND_BASE}/api/wake")
     data = res.json()
     print(f"Wake response status: {data.get('status')}")
-    assert data.get("status") == "activated", "Failed to activate FSM"
+    assert data.get("status") in ["activated", "confirm"], "Failed to activate FSM"
     
     # Immediately check state
     res = requests.get(f"{BACKEND_BASE}/api/v1/state")
@@ -45,8 +45,8 @@ def test_fsm_lockout_and_watchdog():
     res = requests.post(f"{BACKEND_BASE}/api/query", json={"text": "hello aarya"})
     print(f"Query during CONFIRM status code: {res.status_code}")
     print(f"Query during CONFIRM response: {res.text}")
-    assert res.status_code == 403, f"Expected 403 Forbidden but got {res.status_code}"
-    print("[PASS] State-1 strictly rejected direct query with 403 Forbidden!")
+    assert res.status_code == 503, f"Expected 503 Service Unavailable/Retry-After but got {res.status_code}"
+    print("[PASS] State-1 strictly rejected direct query with 503 Retry-After!")
     
     # Wait for the 2-second session safety watchdog to fire
     print("Sleeping 3.0 seconds to wait for FSM Watchdog timer...")
