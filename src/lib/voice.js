@@ -300,9 +300,19 @@ export function receiveAudioStreamChunk(base64PCM) {
 }
 
 async function processChunkQueue() {
-  if (isDecoding || chunkQueue.length === 0) return;
-  isDecoding = true;
+  if (isDecoding) return;
   
+  // 2-Chunk Playback Pre-Buffering Gate:
+  // If no audio is currently playing (audioSourcesQueue.length === 0) and the stream is still active (isStreamingActive === true),
+  // do not decode or play until chunkQueue.length >= 2.
+  if (audioSourcesQueue.length === 0 && isStreamingActive && chunkQueue.length < 2) {
+    console.log(`[voice.js] Pre-buffering: holding stream playback (chunks: ${chunkQueue.length}/2)...`);
+    return;
+  }
+  
+  if (chunkQueue.length === 0) return;
+  
+  isDecoding = true;
   const base64PCM = chunkQueue.shift();
   try {
     const binaryString = atob(base64PCM);
@@ -385,6 +395,8 @@ async function processChunkQueue() {
 export function endAudioStream() {
   console.log("[voice.js] Web Audio progressive stream ended.");
   isStreamingActive = false;
+  // Trigger final flush
+  processChunkQueue();
   // If no source is playing, we can complete speaking state immediately
   if (audioSourcesQueue.length === 0) {
     isSpeakingState = false;

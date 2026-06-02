@@ -567,8 +567,8 @@ async def synthesize_speech(req: dict):
         base64_audio = base64.b64encode(audio_bytes).decode("utf-8") if audio_bytes else ""
         
         # If currently in CONFIRM state, advance to ACTIVE/operational state
-        if fsm.current_state == AARYAState.CONFIRM:
-            fsm.on_activation_complete()
+        if await fsm.get_state() == AARYAState.CONFIRM:
+            await fsm.on_activation_complete()
             
         return {
             "status": "success",
@@ -884,17 +884,26 @@ def wake_ui():
 _state_lock = asyncio.Lock()
 _auto_transition_task = None
 
-async def _auto_transition_to_active_task(delay: float = 4.0):
+def _make_frame(seq: int, frame_type: str, data: str) -> str:
+    """Standardized sequence-tagged NDJSON frame builder."""
+    return json.dumps({
+        "seq": seq,
+        "type": frame_type,
+        "data": data
+    }) + "\n"
+
+async def _auto_transition_to_active_task(delay: float = 5.0):
     await asyncio.sleep(delay)
     async with _state_lock:
-        if fsm.current_state == AARYAState.CONFIRM:
-            fsm.on_activation_complete()
+        if await fsm.get_state() == AARYAState.CONFIRM:
+            await fsm.on_activation_complete()
             print("[AARYA/FSM] Auto-transitioned from CONFIRM to ACTIVE via fallback timer.")
 
-async def stream_groq_fallback(user_input: str, history: list):
+async def stream_groq_fallback(user_input: str, history: list, start_seq: int = 0):
+    seq = start_seq
     print("[AARYA/Stream] Entering Groq fallback streaming pathway...")
     if not GROQ_API_KEY:
-        yield json.dumps({"type": "error", "data": "GROQ_API_KEY is not defined."}) + "\n"
+        yield _make_frame(seq, "error", "GROQ_API_KEY is not defined.")
         return
 
     headers = {
@@ -929,7 +938,7 @@ async def stream_groq_fallback(user_input: str, history: list):
             resp = await asyncio.to_thread(run_post)
             
         if resp.status_code != 200:
-            yield json.dumps({"type": "error", "data": f"Groq stream error: {resp.text}"}) + "\n"
+            yield _make_frame(seq, "error", f"Groq stream error: {resp.text}")
             return
             
         current_sentence = []
@@ -946,7 +955,8 @@ async def stream_groq_fallback(user_input: str, history: list):
                         delta = parsed["choices"][0]["delta"]
                         content = delta.get("content", "")
                         if content:
-                            yield json.dumps({"type": "text", "data": content}) + "\n"
+                            yield _make_frame(seq, "text", content)
+                            seq += 1
                             
                             current_sentence.append(content)
                             sentence_str = "".join(current_sentence)
@@ -963,20 +973,26 @@ async def stream_groq_fallback(user_input: str, history: list):
                                                 raw_pcm = audio_bytes
                                             base64_audio = base64.b64encode(raw_pcm).decode("utf-8")
                                             print(f"[AUDIO CHUNK YIELD]: Yielding {len(raw_pcm)} bytes (Groq fallback)")
-                                            yield json.dumps({"type": "audio", "data": base64_audio}) + "\n"
+                                            yield _make_frame(seq, "audio", base64_audio)
+                                            seq += 1
                                     except Exception:
                                         pass
                                 current_sentence.clear()
                     except Exception:
                         pass
+                        
+        yield _make_frame(seq, "done", "")
+        seq += 1
+                        
     except Exception as e:
         print(f"[AARYA/Stream] Groq streaming failed: {e}")
-        yield json.dumps({"type": "error", "data": str(e)}) + "\n"
+        yield _make_frame(seq, "error", str(e))
 
 async def stream_gemini_response(user_input: str, history: list):
+    seq = 0
     gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not gemini_key:
-        yield json.dumps({"type": "error", "data": "GEMINI_API_KEY is not defined."}) + "\n"
+        yield _make_frame(seq, "error", "GEMINI_API_KEY is not defined.")
         return
 
     try:
@@ -1035,16 +1051,21 @@ async def stream_gemini_response(user_input: str, history: list):
                 
             for part in content.parts:
                 if part.text:
-                    yield json.dumps({"type": "text", "data": part.text}) + "\n"
+                    yield _make_frame(seq, "text", part.text)
+                    seq += 1
                 if part.inline_data:
                     audio_bytes = part.inline_data.data
                     base64_audio = base64.b64encode(audio_bytes).decode("utf-8")
                     print(f"[AUDIO CHUNK YIELD]: Yielding {len(audio_bytes)} bytes")
-                    yield json.dumps({"type": "audio", "data": base64_audio}) + "\n"
+                    yield _make_frame(seq, "audio", base64_audio)
+                    seq += 1
+                    
+        yield _make_frame(seq, "done", "")
+        seq += 1
                     
     except Exception as e:
         print(f"[AARYA/Stream] Gemini stream failed: {e}. Falling back to Groq stream...")
-        async for frame in stream_groq_fallback(user_input, history):
+        async for frame in stream_groq_fallback(user_input, history, start_seq=seq):
             yield frame
 
 async def chat_stream_generator(user_message: str, history: list, user_id: str):
@@ -1067,20 +1088,22 @@ async def chat_stream_generator(user_message: str, history: list, user_id: str):
 async def api_wake():
     global _auto_transition_task
     async with _state_lock:
-        if fsm.current_state == AARYAState.DORMANT:
-            fsm.force_state(AARYAState.CONFIRM, greeting_played=True)
+        state = await fsm.get_state()
+        if state == AARYAState.DORMANT:
+            await fsm.force_state(AARYAState.CONFIRM, greeting_played=True)
             
-            wav_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "confirm_yes_sir.wav")
-            if not os.path.exists(wav_path):
-                wav_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fallback_confirm.wav")
-            
-            audio_bytes = b""
-            if os.path.exists(wav_path):
-                try:
-                    with open(wav_path, "rb") as f:
-                        audio_bytes = f.read()
-                except Exception as e:
-                    print(f"[AARYA] Failed to read cached activation WAV: {e}")
+            # Retrieve pre-cached WAV directly from FSM memory (0ms latency disk bypass)
+            audio_bytes = fsm.get_cached_greeting_wav()
+            if not audio_bytes:
+                wav_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "confirm_yes_sir.wav")
+                if not os.path.exists(wav_path):
+                    wav_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fallback_confirm.wav")
+                if os.path.exists(wav_path):
+                    try:
+                        with open(wav_path, "rb") as f:
+                            audio_bytes = f.read()
+                    except Exception as e:
+                        print(f"[AARYA] Failed to read cached activation WAV: {e}")
             
             if not audio_bytes:
                 audio_bytes = await generate_gemini_audio_with_fallback("Yes sir, I am listening.")
@@ -1090,7 +1113,7 @@ async def api_wake():
             if _auto_transition_task and not _auto_transition_task.done():
                 _auto_transition_task.cancel()
                 
-            _auto_transition_task = asyncio.create_task(_auto_transition_to_active_task(4.0))
+            _auto_transition_task = asyncio.create_task(_auto_transition_to_active_task(5.0))
             
             return {
                 "status": "activated",
@@ -1100,28 +1123,29 @@ async def api_wake():
         else:
             return {
                 "status": "ignored",
-                "reason": f"System already active in state: {fsm.current_state.name}"
+                "reason": f"System already active in state: {state.name}"
             }
 
 @app.post("/api/confirm_played")
 async def api_confirm_played():
     global _auto_transition_task
     async with _state_lock:
-        if fsm.current_state == AARYAState.CONFIRM:
-            fsm.on_activation_complete()
+        state = await fsm.get_state()
+        if state == AARYAState.CONFIRM:
+            await fsm.on_activation_complete()
             if _auto_transition_task and not _auto_transition_task.done():
                 _auto_transition_task.cancel()
-            return {"status": "success", "state": fsm.current_state.name}
-        return {"status": "ignored", "state": fsm.current_state.name}
+            return {"status": "success", "state": (await fsm.get_state()).name}
+        return {"status": "ignored", "state": state.name}
 
 @app.post("/api/dismiss")
 async def api_dismiss():
     global _auto_transition_task
     async with _state_lock:
-        fsm.reset()
+        await fsm.reset()
         if _auto_transition_task and not _auto_transition_task.done():
             _auto_transition_task.cancel()
-        return {"status": "dismissed", "state": fsm.current_state.name}
+        return {"status": "dismissed", "state": (await fsm.get_state()).name}
 
 @app.post("/api/query")
 async def api_query(req: dict):
@@ -1129,10 +1153,16 @@ async def api_query(req: dict):
     if not query:
         raise HTTPException(status_code=400, detail="Empty query")
         
-    if fsm.current_state != AARYAState.ACTIVE:
+    state = await fsm.get_state()
+    if state == AARYAState.CONFIRM:
         raise HTTPException(
-            status_code=503,
-            detail=f"AARYA not in ACTIVE state. Current state: {fsm.current_state.name}."
+            status_code=403,
+            detail="Forbidden: Query attempts are blocked in CONFIRM state."
+        )
+    elif state != AARYAState.ACTIVE:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Forbidden: AARYA not in ACTIVE state. Current state: {state.name}."
         )
         
     history = get_chat_history("Ayush")
@@ -1189,9 +1219,9 @@ async def ambient_query(req: dict):
             return {"status": "electron_not_running", "error": str(e)}
 
     # ── State Machine Check ──
-    if not fsm.on_query_received(query):
+    if not await fsm.on_query_received(query):
         # Trigger FSM STATE 0 -> STATE 1 transition and get hardcoded activation greeting
-        greeting = fsm.on_wake_word_detected()
+        greeting = await fsm.on_wake_word_detected()
         if greeting:
             detailed_text = f"### AARYA Woken\n{greeting}"
             voice_summary = greeting
@@ -1200,10 +1230,12 @@ async def ambient_query(req: dict):
             save_message("Ayush", "assistant", detailed_text)
 
             # Generate native confirmation WAV bytes
-            audio_bytes = await generate_confirmation_audio()
+            audio_bytes = fsm.get_cached_greeting_wav()
+            if not audio_bytes:
+                audio_bytes = await generate_confirmation_audio()
             base64_audio = base64.b64encode(audio_bytes).decode("utf-8") if audio_bytes else ""
             
-            fsm.on_activation_complete()
+            await fsm.on_activation_complete()
 
             try:
                 res = requests.post("http://127.0.0.1:3001/ambient-response", json={
@@ -1302,8 +1334,8 @@ async def chat(req: dict):
         return StreamingResponse(empty_stream(), media_type="application/x-ndjson")
 
     # FSM Operational Guard Check & Auto-Activation for Manual UI Input
-    if fsm.current_state != AARYAState.ACTIVE:
-        fsm.force_state(AARYAState.ACTIVE, greeting_played=True)
+    if await fsm.get_state() != AARYAState.ACTIVE:
+        await fsm.force_state(AARYAState.ACTIVE, greeting_played=True)
 
     print("Fetching memory...")
     history = get_chat_history(user_id)
@@ -1329,8 +1361,8 @@ async def vision_query(req: dict):
     print(f"[AARYA/Vision] Triggered Vision Scan! Query: '{user_query}'")
     
     # FSM Operational Guard Check & Auto-Activation for Manual UI Input
-    if fsm.current_state != AARYAState.ACTIVE:
-        fsm.force_state(AARYAState.ACTIVE, greeting_played=True)
+    if await fsm.get_state() != AARYAState.ACTIVE:
+        await fsm.force_state(AARYAState.ACTIVE, greeting_played=True)
     
     # Save user message to Supabase
     save_message(user_id, "user", f"[Vision Scan] {user_query}")

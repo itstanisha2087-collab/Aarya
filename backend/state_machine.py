@@ -1,6 +1,6 @@
-# state_machine.py — AARYA FSM Controller
+# state_machine.py — AARYA FSM Controller (v2.4.0)
 from enum import IntEnum
-from threading import Lock
+import asyncio
 import logging
 import os
 import json
@@ -14,16 +14,21 @@ class AARYAState(IntEnum):
 
 class AARYAStateMachine:
     """
-    Strict FSM controller matching AARYA PRD v2.0.0. Thread-safe via Lock.
+    Strict FSM controller matching AARYA PRD v2.4.0. Thread-safe via asyncio.Lock.
     """
     DEFAULT_ACTIVATION = "Yes sir, I am listening."
 
     def __init__(self):
-        self._lock = Lock()
+        self._lock = asyncio.Lock()
         self._state = AARYAState.DORMANT
         self._activation_fired = False
         self._cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state_cache.json")
+        self._cached_wav = None
+        
+        # Load cache synchronous during boot
         self._initialize_from_cache()
+        # Pre-cache greeting WAV
+        self._pre_cache_greetings()
 
     def _get_os_boot_time(self) -> float:
         try:
@@ -65,24 +70,41 @@ class AARYAStateMachine:
         except Exception as e:
             logging.error(f"[FSM] Failed to write session cache: {e}")
 
-    @property
-    def current_state(self) -> AARYAState:
-        with self._lock:
+    def _pre_cache_greetings(self):
+        try:
+            assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+            wav_path = os.path.join(assets_dir, "confirm_yes_sir.wav")
+            if not os.path.exists(wav_path):
+                wav_path = os.path.join(assets_dir, "fallback_confirm.wav")
+            
+            if os.path.exists(wav_path):
+                with open(wav_path, "rb") as f:
+                    self._cached_wav = f.read()
+                logging.info(f"[FSM] Pre-cached greeting WAV: {wav_path} ({len(self._cached_wav)} bytes)")
+            else:
+                logging.warning(f"[FSM] Greeting WAV not found at {wav_path}")
+        except Exception as e:
+            logging.error(f"[FSM] Failed to pre-cache greeting WAV: {e}")
+
+    def get_cached_greeting_wav(self) -> bytes:
+        return self._cached_wav
+
+    async def get_state(self) -> AARYAState:
+        async with self._lock:
             return self._state
 
-    @property
-    def greeting_played(self) -> bool:
-        with self._lock:
+    async def get_greeting_played(self) -> bool:
+        async with self._lock:
             return self._activation_fired
 
-    def on_wake_word_detected(self) -> str:
+    async def on_wake_word_detected(self) -> str:
         """
         Called by wake-word engine. Validates state, fires STATE 1,
         returns hardcoded activation string, then advances to STATE 2.
         """
-        with self._lock:
+        async with self._lock:
             if self._state != AARYAState.DORMANT:
-                # Already active — duplicate trigger matches query, skip reactivation
+                # Already active — skip reactivation
                 return None
 
             if self._activation_fired:
@@ -95,20 +117,21 @@ class AARYAStateMachine:
             logging.info("[FSM] Transitioned to STATE 1: CONFIRM")
             return self.DEFAULT_ACTIVATION
 
-    def on_activation_complete(self):
+    async def on_activation_complete(self):
         """Called after activation greeting delivery finishes."""
-        with self._lock:
+        async with self._lock:
             if self._state == AARYAState.CONFIRM:
                 self._state = AARYAState.ACTIVE
                 self._save_to_cache()
                 logging.info("[FSM] Transitioned to STATE 2: ACTIVE")
 
-    def on_query_received(self, query: str) -> bool:
+    async def on_query_received(self, query: str) -> bool:
         """
         Validates that a query can be processed.
         In State 0, a query triggers activation first!
+        In State 1, query is strictly rejected.
         """
-        with self._lock:
+        async with self._lock:
             if self._state == AARYAState.DORMANT:
                 # DORMANT trigger -> activate and play greeting
                 self._state = AARYAState.CONFIRM
@@ -120,18 +143,18 @@ class AARYAStateMachine:
                 return False  # Blocks during greeting delivery
             return True  # STATE 2 allows direct dialogue loop
 
-    def force_state(self, state: AARYAState, greeting_played: bool = None):
+    async def force_state(self, state: AARYAState, greeting_played: bool = None):
         """Forcefully changes the state machine state."""
-        with self._lock:
+        async with self._lock:
             self._state = state
             if greeting_played is not None:
                 self._activation_fired = greeting_played
             self._save_to_cache()
             logging.info(f"[FSM] Forcefully set state to {self._state.name}")
 
-    def reset(self):
+    async def reset(self):
         """Hard reset to STATE 0. Called on session end or crash recovery."""
-        with self._lock:
+        async with self._lock:
             self._state = AARYAState.DORMANT
             self._activation_fired = False
             self._save_to_cache()

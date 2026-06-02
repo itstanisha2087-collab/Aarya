@@ -8,6 +8,7 @@ import time
 import requests
 import threading
 import winsound
+import numpy as np
 
 # Set standard streams to UTF-8 to prevent encoding crashes on Windows
 sys.stdout.reconfigure(encoding='utf-8')
@@ -22,12 +23,18 @@ print("Running inside an active desktop session with direct mic access.")
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000
-CHUNK = 256 # 256 samples per chunk = 16ms duration
+CHUNK = 480 # 480 samples per chunk = 30ms duration for VAD alignment
 
 BACKEND_BASE_URL = "http://127.0.0.1:8000"
 BACKEND_AMBIENT_URL = f"{BACKEND_BASE_URL}/api/ambient-query"
 BACKEND_TRANSCRIBE_URL = f"{BACKEND_BASE_URL}/transcribe"
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "listener_debug.log")
+
+try:
+    import webrtcvad
+    WEBRTC_VAD_AVAILABLE = True
+except (ImportError, Exception):
+    WEBRTC_VAD_AVAILABLE = False
 
 def log(msg):
     """Print and append to debug log file."""
@@ -163,6 +170,50 @@ def transcribe_audio_bytes(wav_bytes):
         log(f"[AARYA/Listener] Transcription failed: {e}")
     return ""
 
+def compute_zcr(samples):
+    if len(samples) <= 1:
+        return 0.0
+    signs = np.sign(samples)
+    signs[signs == 0] = 1
+    crossings = np.sum(np.abs(np.diff(signs)) > 0)
+    return crossings / (len(samples) - 1)
+
+class AdaptiveNoiseFloor:
+    def __init__(self, initial_floor=250.0, alpha=0.05, vocal_peak_multiplier=2.8):
+        self.noise_floor = initial_floor
+        self.alpha = alpha
+        self.vocal_peak_multiplier = vocal_peak_multiplier
+        
+    def update(self, rms):
+        self.noise_floor = (self.noise_floor * (1.0 - self.alpha)) + (rms * self.alpha)
+        self.noise_floor = max(self.noise_floor, 100.0)
+        return self.noise_floor
+
+    @property
+    def vocal_threshold(self):
+        return self.noise_floor * self.vocal_peak_multiplier
+
+class WebRTCVADGate:
+    def __init__(self, aggressiveness=2):
+        self.vad = None
+        if WEBRTC_VAD_AVAILABLE:
+            try:
+                self.vad = webrtcvad.Vad(aggressiveness)
+            except Exception as e:
+                log(f"[AARYA/Listener] WebRTC VAD initialization failed: {e}")
+                self.vad = None
+
+    def is_voiced(self, data, rate=16000):
+        if self.vad is not None:
+            try:
+                return self.vad.is_speech(data, rate)
+            except Exception as e:
+                log(f"[AARYA/Listener] WebRTC VAD error: {e}")
+        
+        samples = np.frombuffer(data, dtype=np.int16)
+        zcr = compute_zcr(samples)
+        return zcr < 0.35
+
 def listening_loop():
     p = pyaudio.PyAudio()
     
@@ -180,20 +231,22 @@ def listening_loop():
 
     log("[AARYA/Listener] Microphone stream opened and PERMANENTLY ON.")
     
-    # VAD state tracking parameters
-    ambient_energy = 250.0
-    speech_active = False
+    # Instantiate Gates
+    noise_detector = AdaptiveNoiseFloor(initial_floor=250.0, alpha=0.05, vocal_peak_multiplier=2.8)
+    vad_gate = WebRTCVADGate(aggressiveness=2)
+    
+    # State tracking variables
+    # States: 'WAITING', 'CAPTURING', 'SILENCE_HOLD'
+    state = 'WAITING'
     speech_buffer = []
-    silence_chunks = 0
     pre_speech_buffer = []
+    silence_chunks = 0
     
-    # Strict VAD limits
-    # 800ms silence threshold: 800ms / 16ms per chunk = 50 chunks
-    SILENCE_LIMIT_CHUNKS = 50
-    # 1.5 seconds maximum pre-speech buffer: 1.5s / 16ms = 93 chunks
-    PRE_SPEECH_LIMIT_CHUNKS = 93
+    # Strict VAD limits based on 30ms (CHUNK=480 at 16kHz)
+    SILENCE_LIMIT_CHUNKS = 27  # ~810ms
+    PRE_SPEECH_LIMIT_CHUNKS = 50  # ~1.5s
     
-    log("[AARYA/Listener] Starting continuous PyAudio dynamic VAD loop...")
+    log("[AARYA/Listener] Starting three-gate pre-recognizer Dynamic VAD loop...")
     
     while True:
         try:
@@ -201,6 +254,11 @@ def listening_loop():
             if check_playback_state():
                 time.sleep(0.1)
                 pre_speech_buffer.clear()
+                # If we were capturing, reset state to WAITING to prevent hum capturing
+                if state != 'WAITING':
+                    log("[AARYA/Listener] Speaker playing back. Resetting capture state to WAITING.")
+                    state = 'WAITING'
+                    speech_buffer.clear()
                 continue
                 
             # Read mic chunk
@@ -208,47 +266,61 @@ def listening_loop():
             if not data:
                 continue
                 
-            # Compute RMS energy of raw Int16 PCM chunk
-            rms = audioop.rms(data, 2)
+            # Compute RMS using NumPy for efficiency/precision
+            samples = np.frombuffer(data, dtype=np.int16)
+            if len(samples) == 0:
+                continue
+            rms = np.sqrt(np.mean(samples.astype(np.float64) ** 2))
             
-            # Dynamic ambient noise floor adaptation during silence
-            if not speech_active:
-                ambient_energy = (ambient_energy * 0.99) + (rms * 0.01)
-                ambient_energy = max(ambient_energy, 100.0) # floor limit
-                
-            # Check voice activity threshold (adapted based on noise floor)
-            threshold = ambient_energy * 1.5 + 120
+            # Check Gate 2 (vocal peak)
+            is_vocal = rms > noise_detector.vocal_threshold
             
-            if rms > threshold:
-                if not speech_active:
-                    log(f"[AARYA/Listener] Voice activity detected! (RMS: {rms:.1f} | Threshold: {threshold:.1f})")
-                    speech_active = True
+            # Check Gate 3 (WebRTC / ZCR VAD)
+            is_voiced = vad_gate.is_voiced(data, RATE)
+            
+            # Vocal frame detection requires BOTH Gate 2 and Gate 3 passing
+            is_speech_frame = is_vocal and is_voiced
+            
+            if state == 'WAITING':
+                if is_speech_frame:
+                    log(f"[AARYA/Listener] Vocal onset detected! (RMS: {rms:.1f} | Threshold: {noise_detector.vocal_threshold:.1f})")
+                    state = 'CAPTURING'
                     speech_buffer = list(pre_speech_buffer)
-                    silence_chunks = 0
-                
-                speech_buffer.append(data)
-                silence_chunks = 0
-            else:
-                if speech_active:
                     speech_buffer.append(data)
-                    silence_chunks += 1
-                    
-                    # Enforce strict 800ms silence VAD cutoff
-                    if silence_chunks >= SILENCE_LIMIT_CHUNKS:
-                        log(f"[AARYA/Listener] Silence detected for 800ms. Cutting recording...")
-                        speech_active = False
-                        
-                        captured_pcm = list(speech_buffer[:-silence_chunks]) # strip silence padding
-                        speech_buffer.clear()
-                        
-                        if len(captured_pcm) > 10: # skip empty background ticks
-                            threading.Thread(target=process_speech_phrase, args=(captured_pcm,), daemon=True).start()
+                    silence_chunks = 0
                 else:
+                    # Update adaptive noise floor during silence
+                    noise_detector.update(rms)
                     # Maintain pre-speech buffer
                     pre_speech_buffer.append(data)
                     if len(pre_speech_buffer) > PRE_SPEECH_LIMIT_CHUNKS:
                         pre_speech_buffer.pop(0)
                         
+            elif state == 'CAPTURING':
+                speech_buffer.append(data)
+                if is_speech_frame:
+                    silence_chunks = 0
+                else:
+                    state = 'SILENCE_HOLD'
+                    silence_chunks = 1
+                    
+            elif state == 'SILENCE_HOLD':
+                speech_buffer.append(data)
+                if is_speech_frame:
+                    state = 'CAPTURING'
+                    silence_chunks = 0
+                else:
+                    silence_chunks += 1
+                    if silence_chunks >= SILENCE_LIMIT_CHUNKS:
+                        log(f"[AARYA/Listener] Silence detected for 800ms ({silence_chunks} chunks). Cutting recording...")
+                        state = 'WAITING'
+                        
+                        captured_pcm = list(speech_buffer[:-silence_chunks])  # strip silence padding
+                        speech_buffer.clear()
+                        
+                        if len(captured_pcm) > 10:  # skip empty background ticks
+                            threading.Thread(target=process_speech_phrase, args=(captured_pcm,), daemon=True).start()
+                            
         except Exception as e:
             log(f"[AARYA/Listener] Error in listen loop: {e}")
             time.sleep(0.1)
