@@ -33,7 +33,7 @@ CONFIRM_ASSET_CANDIDATES = [
 
 # Absolute maximum time the FSM can remain in CONFIRM before
 # the watchdog forces it into ACTIVE, regardless of any callback.
-CONFIRM_WATCHDOG_SECONDS = 2.0
+CONFIRM_WATCHDOG_SECONDS = 1.5
 
 # Silence timeout: ACTIVE → DORMANT after N seconds with no query
 SILENCE_TIMEOUT_SECONDS = 120.0
@@ -59,7 +59,7 @@ class AaryaFSM:
     - CONFIRM state NEVER persists longer than CONFIRM_WATCHDOG_SECONDS.
     - Missing / corrupt WAV asset never bricks the system.
     - All state mutations are serialised through asyncio.Lock.
-    - /api/query returns 403 only in DORMANT; CONFIRM auto-escapes in 2s.
+    - /api/query returns 403 only in DORMANT; CONFIRM auto-escapes in 1.5s.
     """
 
     def __init__(self):
@@ -118,6 +118,14 @@ class AaryaFSM:
     def state(self) -> STATE:
         return self._state
 
+    @property
+    def current_state(self) -> STATE:
+        return self._state
+
+    @current_state.setter
+    def current_state(self, val: STATE) -> None:
+        self._state = val
+
     # ------------------------------------------------------------------
     # /api/wake  →  trigger_wake()
     # ------------------------------------------------------------------
@@ -126,7 +134,7 @@ class AaryaFSM:
         """
         Valid transition: DORMANT → CONFIRM.
         Returns confirmation payload (audio bytes or text fallback).
-        Starts a 2-second watchdog that forces ACTIVE regardless of
+        Starts a 1.5-second watchdog that forces ACTIVE regardless of
         whether the frontend ever calls /api/confirm_played.
         """
         async with self._lock:
@@ -140,7 +148,7 @@ class AaryaFSM:
             self._state = STATE.CONFIRM
             logger.info("[AARYA FSM] DORMANT → CONFIRM")
 
-        # Launch 2-second watchdog OUTSIDE the lock to prevent deadlock.
+        # Launch 1.5-second watchdog OUTSIDE the lock to prevent deadlock.
         self._cancel_watchdog()
         self._watchdog_task = asyncio.create_task(
             self._confirm_watchdog(CONFIRM_WATCHDOG_SECONDS),

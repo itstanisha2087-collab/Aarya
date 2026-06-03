@@ -903,7 +903,10 @@ async def route_wake():
     Never raises. Never calls Gemini. Never blocks.
     """
     try:
-        return await fsm.trigger_wake()
+        res = await fsm.trigger_wake()
+        # Programmatic fallback: instantly toggle state to ACTIVE after delivering confirmation audio block
+        await fsm.confirm_played()
+        return res
     except Exception as exc:
         logger.error("[AARYA /api/wake] Unexpected exception: %s", exc)
         fsm._state = STATE.ACTIVE
@@ -941,6 +944,10 @@ async def route_query(request: QueryRequest):
     DORMANT state → 403 Forbidden.
     ACTIVE state  → StreamingResponse.
     """
+    if fsm.state == STATE.CONFIRM:
+        print("[AARYA/FSM] State transition override log: CONFIRM -> ACTIVE forced by route_query")
+        await fsm.confirm_played()
+
     try:
         fsm.assert_active()
     except ValueError as exc:
@@ -1288,7 +1295,10 @@ async def chat(req: dict):
         return StreamingResponse(empty_stream(), media_type="application/x-ndjson")
 
     # FSM Operational Guard Check & Auto-Activation for Manual UI Input
-    if fsm.state != STATE.ACTIVE:
+    if fsm.state == STATE.CONFIRM:
+        print("[AARYA/FSM] State transition override log: CONFIRM -> ACTIVE forced by chat")
+        await fsm.confirm_played()
+    elif fsm.state != STATE.ACTIVE:
         await fsm.confirm_played()
 
     print("Fetching memory...")
