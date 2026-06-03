@@ -904,6 +904,13 @@ async def route_wake():
     """
     try:
         res = await fsm.trigger_wake()
+        async def auto_activate():
+            await asyncio.sleep(1.5)
+            async with fsm._lock:
+                fsm.state = STATE.ACTIVE
+                fsm._restart_silence_timeout()
+            logger.info("[FSM] Auto-watchdog fired. State switched to ACTIVE")
+        asyncio.create_task(auto_activate())
         return res
     except Exception as exc:
         logger.error("[AARYA /api/wake] Unexpected exception: %s", exc)

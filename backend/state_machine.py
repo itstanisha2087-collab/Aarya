@@ -118,6 +118,10 @@ class AaryaFSM:
     def state(self) -> STATE:
         return self._state
 
+    @state.setter
+    def state(self, val: STATE) -> None:
+        self._state = val
+
     @property
     def current_state(self) -> STATE:
         return self._state

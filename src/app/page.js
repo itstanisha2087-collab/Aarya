@@ -18,6 +18,10 @@ export default function Home() {
     setPhase('chat');
   }, []);
 
+  if (!mounted) {
+    return <main style={{ width: '100vw', height: '100vh', background: '#000000' }} />;
+  }
+
   return (
     <main
       style={{

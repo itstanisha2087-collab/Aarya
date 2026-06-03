@@ -182,10 +182,8 @@ class GeminiStreamInterceptor:
 
     def _build_generation_config(self, voice: str) -> genai_types.GenerateContentConfig:
         """Constructs the Gemini generation config for native audio output."""
-        # AI Studio Gemini 2.5 Flash Preview TTS accepts only ["AUDIO"] response modality parameter,
-        # but natively yields both text transcript and audio bytes in the stream response candidates.
         return genai_types.GenerateContentConfig(
-            response_modalities=["AUDIO"],
+            response_modalities=RESPONSE_MODALITIES,
             speech_config=genai_types.SpeechConfig(
                 voice_config=genai_types.VoiceConfig(
                     prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
@@ -215,10 +213,7 @@ class GeminiStreamInterceptor:
             )
         ]
 
-        # AI Studio Gemini 2.5 Flash only supports audio output under the -preview-tts variant.
         api_model = self.model
-        if api_model == "gemini-2.5-flash":
-            api_model = "gemini-2.5-flash-preview-tts"
 
         # Use the async streaming API — await first to get the async iterator
         stream_response = await client.aio.models.generate_content_stream(
