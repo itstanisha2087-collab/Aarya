@@ -565,8 +565,8 @@ async def synthesize_speech(req: dict):
         base64_audio = base64.b64encode(audio_bytes).decode("utf-8") if audio_bytes else ""
         
         # If currently in CONFIRM state, advance to ACTIVE/operational state
-        if await fsm.get_state() == AARYAState.CONFIRM:
-            await fsm.on_activation_complete()
+        if fsm.state == STATE.CONFIRM:
+            await fsm.confirm_played()
             
         return {
             "status": "success",
@@ -904,12 +904,11 @@ async def route_wake():
     """
     try:
         res = await fsm.trigger_wake()
-        # Programmatic fallback: instantly toggle state to ACTIVE after delivering confirmation audio block
-        await fsm.confirm_played()
         return res
     except Exception as exc:
         logger.error("[AARYA /api/wake] Unexpected exception: %s", exc)
-        fsm._state = STATE.ACTIVE
+        async with fsm._lock:
+            fsm._state = STATE.ACTIVE
         return {
             "status": "confirm",
             "state": STATE.ACTIVE,
@@ -1164,7 +1163,9 @@ async def ambient_query(req: dict):
             return {"status": "electron_not_running", "error": str(e)}
 
     # ── State Machine Check ──
-    if fsm.state == STATE.DORMANT:
+    if fsm.state == STATE.CONFIRM:
+        await fsm.confirm_played()
+    elif fsm.state == STATE.DORMANT:
         wake_res = await fsm.trigger_wake()
         greeting = wake_res.get("text", "Yes sir, I am listening.")
         detailed_text = f"### AARYA Woken\n{greeting}"
@@ -1177,8 +1178,6 @@ async def ambient_query(req: dict):
         # FSM pre-loads greeting as base64 in _confirm_audio_b64 (no method exists for raw bytes)
         audio_bytes = base64.b64decode(fsm._confirm_audio_b64) if fsm._confirm_audio_b64 else None
         base64_audio = base64.b64encode(audio_bytes).decode("utf-8") if audio_bytes else ""
-        
-        await fsm.confirm_played()
 
         try:
             res = requests.post("http://127.0.0.1:3001/ambient-response", json={

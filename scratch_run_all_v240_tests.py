@@ -34,18 +34,27 @@ def test_fsm_lockout_and_watchdog():
     print(f"Wake response status: {data.get('status')}")
     assert data.get("status") in ["activated", "confirm"], "Failed to activate FSM"
     
-    # Immediately check state (under v2.5.1, instantly toggled to ACTIVE)
+    # Immediately check state (should be CONFIRM / 1 immediately after wake)
     res = requests.get(f"{BACKEND_BASE}/api/v1/state")
     state = res.json()["current_state"]
-    print(f"State immediately after wake (Expected 2 - ACTIVE under v2.5.1): {state}")
+    print(f"State immediately after wake (Expected 1 - CONFIRM): {state}")
+    assert state == 1, f"Expected CONFIRM (1) but got {state}"
+    
+    # Wait 1.6 seconds for watchdog to transition FSM to ACTIVE (2)
+    print("Waiting 1.6 seconds for watchdog timer to transition state to ACTIVE...")
+    time.sleep(1.6)
+    
+    res = requests.get(f"{BACKEND_BASE}/api/v1/state")
+    state = res.json()["current_state"]
+    print(f"State after watchdog timeout (Expected 2 - ACTIVE): {state}")
     assert state == 2, f"Expected ACTIVE (2) but got {state}"
     
-    # Attempt a query during State-1 (Should succeed with 200 OK because state is ACTIVE or overridden)
+    # Attempt a query (Should succeed with 200 OK because state is ACTIVE)
     print("Attempting to query /api/query...")
     res = requests.post(f"{BACKEND_BASE}/api/query", json={"text": "hello aarya"})
     print(f"Query status code: {res.status_code}")
     assert res.status_code == 200, f"Expected 200 but got {res.status_code}"
-    print("[PASS] State-1 successfully transitioned/overrode to ACTIVE and query succeeded!")
+    print("[PASS] FSM transitioned from CONFIRM to ACTIVE via watchdog and query succeeded!")
     return True
 
 def test_ndjson_frame_delivery():
