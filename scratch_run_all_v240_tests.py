@@ -99,7 +99,7 @@ def test_ndjson_frame_delivery():
             
             # Assert type
             ftype = frame["type"]
-            assert ftype in ["text", "audio", "done", "error"], f"Invalid frame type: {ftype}"
+            assert ftype in ["text", "audio", "done", "error", "warning"], f"Invalid frame type: {ftype}"
             received_types.add(ftype)
             
             if ftype == "done":

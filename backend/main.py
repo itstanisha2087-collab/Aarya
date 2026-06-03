@@ -1167,9 +1167,8 @@ async def ambient_query(req: dict):
         save_message("Ayush", "assistant", detailed_text)
 
         # Generate native confirmation WAV bytes
-        audio_bytes = fsm.get_cached_greeting_wav()
-        if not audio_bytes:
-            audio_bytes = await generate_confirmation_audio()
+        # FSM pre-loads greeting as base64 in _confirm_audio_b64 (no method exists for raw bytes)
+        audio_bytes = base64.b64decode(fsm._confirm_audio_b64) if fsm._confirm_audio_b64 else None
         base64_audio = base64.b64encode(audio_bytes).decode("utf-8") if audio_bytes else ""
         
         await fsm.confirm_played()
@@ -1249,7 +1248,7 @@ async def ambient_query(req: dict):
 
 async def chat_stream_generator(user_message: str, history: list, user_id: str):
     accumulated_text = []
-    async for frame_str in _stream_query(user_message):
+    async for frame_str in _stream_query_interceptor(user_message):
         yield frame_str
         try:
             trimmed = frame_str.strip()
